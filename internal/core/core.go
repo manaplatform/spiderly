@@ -3,18 +3,52 @@ package core
 import (
 	"context"
 	"fmt"
-	"log"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"spiderly/internal/chunker"
 	"spiderly/internal/crawler"
 	"spiderly/internal/models"
 	"spiderly/internal/sitemap"
-	"spiderly/internal/web"
+)
+
+// ─────────────────────────────────────────────
+//  ANSI Color Codes
+// ─────────────────────────────────────────────
+
+const (
+	Reset      = "\033[0m"
+	Bold       = "\033[1m"
+	Dim        = "\033[2m"
+	Italic     = "\033[3m"
+	Underline  = "\033[4m"
+	
+	// Colors
+	Black      = "\033[30m"
+	Red        = "\033[31m"
+	Green      = "\033[32m"
+	Yellow     = "\033[33m"
+	Blue       = "\033[34m"
+	Magenta    = "\033[35m"
+	Cyan       = "\033[36m"
+	White      = "\033[37m"
+	
+	// Bright Colors
+	BrightRed     = "\033[91m"
+	BrightGreen   = "\033[92m"
+	BrightYellow  = "\033[93m"
+	BrightBlue    = "\033[94m"
+	BrightMagenta = "\033[95m"
+	BrightCyan    = "\033[96m"
+	BrightWhite   = "\033[97m"
+	
+	// Background
+	BgBlue     = "\033[44m"
+	BgMagenta  = "\033[45m"
+	BgCyan     = "\033[46m"
 )
 
 // ─────────────────────────────────────────────
@@ -23,29 +57,27 @@ import (
 
 // CoreConfig holds all configuration for the crawl core
 type CoreConfig struct {
-	// Target configuration
 	TargetURL  string
-	SitemapURL string // Direct sitemap URL (bypasses discovery)
+	SitemapURL string
 
-	// Crawl limits
 	MaxPages    int
 	MaxDepth    int
 	Concurrency int
 	Delay       time.Duration
 	Timeout     time.Duration
 
-	// Sitemap filtering
 	MinPriority float64
 	URLPattern  string
 
-	// Behavior flags
-	ForceRecursive bool // Skip sitemap discovery, use traditional crawl
+	ForceRecursive bool
 	Headless       bool
 	Verbose        bool
-
-	// Web server
-	WebPort    int
-	DisableWeb bool
+	NoColor        bool
+	
+	// Chunker settings
+	EnableChunker bool // Enable parallel chunked processing
+	ChunkSize     int  // URLs per chunk
+	MaxWorkers    int  // Parallel workers
 }
 
 // ─────────────────────────────────────────────
@@ -55,91 +87,53 @@ type CoreConfig struct {
 // Core is the main orchestrator for Spiderly
 type Core struct {
 	config    CoreConfig
-	webServer *web.Server
 	crawler   *crawler.Crawler
+	chunker   *chunker.Chunker
 	stats     *models.CrawlStats
 	results   []models.ScrapedPage
 	mu        sync.RWMutex
 	ctx       context.Context
 	cancel    context.CancelFunc
 	startTime time.Time
+	logger    *Logger
 }
 
-// ─────────────────────────────────────────────
-//  Exported Result Type
-// ─────────────────────────────────────────────
 
-// ScrapedPageResult is the exported result type used by cmd/main.go
-type ScrapedPageResult struct {
-	URL           string    `json:"url"`
-	Title         string    `json:"title"`
-	H1            string    `json:"h1,omitempty"`
-	Description   string    `json:"description,omitempty"`
-	Keywords      string    `json:"keywords,omitempty"`
-	Author        string    `json:"author,omitempty"`
-	PublishedDate string    `json:"published_date,omitempty"`
-	OGImage       string    `json:"og_image,omitempty"`
-	BodyText      string    `json:"body_text,omitempty"`
-	StatusCode    int       `json:"status_code"`
-	ContentType   string    `json:"content_type,omitempty"`
-	ContentLength int64     `json:"content_length"`
-	LoadTimeMs    int64     `json:"load_time_ms"`
-	LinksCount    int       `json:"links_count"`
-	ImagesCount   int       `json:"images_count"`
-	Depth         int       `json:"depth"`
-	ScrapedAt     time.Time `json:"scraped_at"`
-}
-
-// ToScrapedPageResults converts internal models.ScrapedPage slices to exported results
-func ToScrapedPageResults(pages []models.ScrapedPage) []ScrapedPageResult {
-	results := make([]ScrapedPageResult, len(pages))
-	for i, p := range pages {
-		results[i] = ScrapedPageResult{
-			URL:           p.URL,
-			Title:         p.Title,
-			H1:            p.H1,
-			Description:   p.Description,
-			Keywords:      p.Keywords,
-			Author:        p.Author,
-			PublishedDate: p.PublishedDate,
-			OGImage:       p.OGImage,
-			BodyText:      p.BodyText,
-			StatusCode:    p.StatusCode,
-			ContentType:   p.ContentType,
-			ContentLength: p.ContentLength,
-			LoadTimeMs:    p.LoadTimeMs,
-			LinksCount:    p.LinksCount,
-			ImagesCount:   p.ImagesCount,
-			Depth:         p.Depth,
-			ScrapedAt:     p.ScrapedAt,
-		}
-	}
-	return results
-}
 
 // ─────────────────────────────────────────────
 //  Constructors
 // ─────────────────────────────────────────────
 
-// New creates a Core with sensible defaults using just URL and max pages.
-// This is the shorthand constructor used by cmd/main.go:
-//
-//	e := core.New(target, *maxPages)
+
 func New(targetURL string, maxPages int) *Core {
 	return NewCore(CoreConfig{
-		TargetURL:   targetURL,
-		MaxPages:    maxPages,
-		MaxDepth:    10,
-		Concurrency: 5,
-		Delay:       200 * time.Millisecond,
-		Timeout:     30 * time.Second,
-		WebPort:     8080,
-		DisableWeb:  false,
-		Verbose:     false,
+		TargetURL:     targetURL,
+		MaxPages:      maxPages,
+		MaxDepth:      10,
+		Concurrency:   5,
+		Delay:         200 * time.Millisecond,
+		Timeout:       30 * time.Second,
+		Verbose:       false,
+		EnableChunker: false,
+		ChunkSize:     50,
+		MaxWorkers:    4,
 	})
 }
-
-// NewCore creates a new crawl core with full configuration
+// NewChunked creates a Core with chunker enabled
+func NewChunked(targetURL string, maxPages, chunkSize, workers int) *Core {
+	return NewCore(CoreConfig{
+		TargetURL:     targetURL,
+		MaxPages:      maxPages,
+		MaxDepth:      10,
+		Concurrency:   5,
+		Delay:         200 * time.Millisecond,
+		Timeout:       30 * time.Second,
+		Verbose:       false,
+		EnableChunker: true,
+		ChunkSize:     chunkSize,
+		MaxWorkers:    workers,
+	})
+}
 func NewCore(cfg CoreConfig) *Core {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -150,12 +144,11 @@ func NewCore(cfg CoreConfig) *Core {
 		ctx:       ctx,
 		cancel:    cancel,
 		startTime: time.Now(),
+		logger:    NewLogger(cfg.NoColor, cfg.Verbose),
 	}
 }
+// [ApplyConfig remains similar but add chunker fields...]
 
-// ApplyConfig overrides the current configuration.
-// Only non-zero / non-empty values in cfg replace existing ones,
-// so you can selectively override fields after calling New().
 func (c *Core) ApplyConfig(cfg CoreConfig) {
 	if cfg.TargetURL != "" {
 		c.config.TargetURL = cfg.TargetURL
@@ -184,31 +177,350 @@ func (c *Core) ApplyConfig(cfg CoreConfig) {
 	if cfg.URLPattern != "" {
 		c.config.URLPattern = cfg.URLPattern
 	}
-	if cfg.WebPort > 0 {
-		c.config.WebPort = cfg.WebPort
+	if cfg.ChunkSize > 0 {
+		c.config.ChunkSize = cfg.ChunkSize
+	}
+	if cfg.MaxWorkers > 0 {
+		c.config.MaxWorkers = cfg.MaxWorkers
 	}
 
-	// Boolean flags — always apply (they're intentional toggles)
 	c.config.ForceRecursive = cfg.ForceRecursive
 	c.config.Headless = cfg.Headless
 	c.config.Verbose = cfg.Verbose
-	c.config.DisableWeb = cfg.DisableWeb
+	c.config.NoColor = cfg.NoColor
+	c.config.EnableChunker = cfg.EnableChunker
+	
+	c.logger = NewLogger(c.config.NoColor, c.config.Verbose)
 }
+
+// ─────────────────────────────────────────────
+//  Logger - Beautiful Console Output
+// ─────────────────────────────────────────────
+
+type Logger struct {
+	noColor   bool
+	verbose   bool
+	mu        sync.Mutex
+	pageCount int
+	errorCount int
+	startTime time.Time
+}
+
+func NewLogger(noColor, verbose bool) *Logger {
+	return &Logger{
+		noColor:   noColor,
+		verbose:   verbose,
+		startTime: time.Now(),
+	}
+}
+
+func (l *Logger) color(c, text string) string {
+	if l.noColor {
+		return text
+	}
+	return c + text + Reset
+}
+
+func (l *Logger) Header() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	fmt.Println()
+	fmt.Println(l.color(BrightCyan+Bold, "  ╔═══════════════════════════════════════════════════════════════╗"))
+	fmt.Println(l.color(BrightCyan+Bold, "  ║") + l.color(BrightMagenta+Bold, "     🕷️  SPIDERLY - High Performance Web Crawler              ") + l.color(BrightCyan+Bold, "║"))
+	fmt.Println(l.color(BrightCyan+Bold, "  ╚═══════════════════════════════════════════════════════════════╝"))
+	fmt.Println()
+}
+
+func (l *Logger) Phase(phase, message string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	icon := l.getPhaseIcon(phase)
+	phaseText := l.color(BrightYellow+Bold, fmt.Sprintf(" %s %s ", icon, strings.ToUpper(phase)))
+	fmt.Printf("\n%s %s\n", phaseText, l.color(White, message))
+	fmt.Println(l.color(Dim, "  "+strings.Repeat("─", 60)))
+}
+
+func (l *Logger) getPhaseIcon(phase string) string {
+	icons := map[string]string{
+		"init":       "🚀",
+		"discovery":  "🔍",
+		"sitemap":    "🗺️ ",
+		"crawling":   "🕸️ ",
+		"complete":   "✨",
+		"error":      "💥",
+	}
+	if icon, ok := icons[phase]; ok {
+		return icon
+	}
+	return "📌"
+}
+
+func (l *Logger) Info(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	msg := fmt.Sprintf(format, args...)
+	fmt.Printf("  %s %s\n", l.color(Blue, "ℹ"), l.color(White, msg))
+}
+
+func (l *Logger) Success(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	msg := fmt.Sprintf(format, args...)
+	fmt.Printf("  %s %s\n", l.color(BrightGreen, "✓"), l.color(Green, msg))
+}
+
+func (l *Logger) Warning(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	msg := fmt.Sprintf(format, args...)
+	fmt.Printf("  %s %s\n", l.color(Yellow, "⚠"), l.color(Yellow, msg))
+}
+
+func (l *Logger) Error(format string, args ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	msg := fmt.Sprintf(format, args...)
+	fmt.Printf("  %s %s\n", l.color(BrightRed, "✗"), l.color(Red, msg))
+}
+
+func (l *Logger) Verbose(format string, args ...interface{}) {
+	if !l.verbose {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	msg := fmt.Sprintf(format, args...)
+	fmt.Printf("  %s %s\n", l.color(Dim, "›"), l.color(Dim, msg))
+}
+
+func (l *Logger) PageScraped(url, title string, statusCode int, loadTime int64) {
+	l.mu.Lock()
+	l.pageCount++
+	count := l.pageCount
+	l.mu.Unlock()
+	
+	// Truncate URL and title for display
+	displayURL := truncateString(url, 50)
+	displayTitle := truncateString(title, 35)
+	if displayTitle == "" {
+		displayTitle = "(no title)"
+	}
+	
+	// Status color
+	statusColor := l.getStatusColor(statusCode)
+	statusStr := l.color(statusColor, fmt.Sprintf("[%d]", statusCode))
+	
+	// Format line
+	countStr := l.color(Cyan, fmt.Sprintf("#%-4d", count))
+	timeStr := l.color(Dim, fmt.Sprintf("%4dms", loadTime))
+	
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fmt.Printf("  %s %s %s %s %s\n",
+		countStr,
+		statusStr,
+		timeStr,
+		l.color(BrightWhite, displayTitle),
+		l.color(Dim, displayURL),
+	)
+}
+
+func (l *Logger) PageError(url string, err error) {
+	l.mu.Lock()
+	l.errorCount++
+	l.mu.Unlock()
+	
+	displayURL := truncateString(url, 50)
+	errMsg := truncateString(err.Error(), 40)
+	
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fmt.Printf("  %s %s %s\n",
+		l.color(Red, "✗ ERR"),
+		l.color(Dim, displayURL),
+		l.color(Red, errMsg),
+	)
+}
+
+func (l *Logger) LinkDiscovered(url string, depth int) {
+	if !l.verbose {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	displayURL := truncateString(url, 60)
+	fmt.Printf("  %s %s %s\n",
+		l.color(Dim, "  └─"),
+		l.color(Dim, fmt.Sprintf("d%d", depth)),
+		l.color(Dim, displayURL),
+	)
+}
+
+func (l *Logger) getStatusColor(code int) string {
+	switch {
+	case code >= 200 && code < 300:
+		return BrightGreen
+	case code >= 300 && code < 400:
+		return BrightYellow
+	case code >= 400 && code < 500:
+		return Yellow
+	case code >= 500:
+		return BrightRed
+	default:
+		return White
+	}
+}
+
+func (l *Logger) SitemapStats(total, filtered, sitemapCount int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	fmt.Printf("\n  %s %s\n",
+		l.color(Magenta, "📊"),
+		l.color(BrightWhite+Bold, "Sitemap Analysis"),
+	)
+	fmt.Printf("     %s Sitemaps found:  %s\n", l.color(Dim, "├─"), l.color(Cyan, fmt.Sprintf("%d", sitemapCount)))
+	fmt.Printf("     %s Total URLs:      %s\n", l.color(Dim, "├─"), l.color(Cyan, fmt.Sprintf("%d", total)))
+	fmt.Printf("     %s After filtering: %s\n", l.color(Dim, "└─"), l.color(BrightGreen, fmt.Sprintf("%d", filtered)))
+	fmt.Println()
+}
+
+func (l *Logger) Progress(current, total int, phase string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	if total == 0 {
+		return
+	}
+	
+	percent := float64(current) / float64(total) * 100
+	barWidth := 30
+	filled := int(float64(barWidth) * float64(current) / float64(total))
+	
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+	
+	fmt.Printf("\r  %s %s %s %s",
+		l.color(Cyan, fmt.Sprintf("%3.0f%%", percent)),
+		l.color(BrightBlue, bar),
+		l.color(White, fmt.Sprintf("%d/%d", current, total)),
+		l.color(Dim, phase),
+	)
+	
+	if current >= total {
+		fmt.Println()
+	}
+}
+
+func (l *Logger) Summary(stats SummaryStats) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	duration := stats.Duration.Round(time.Millisecond)
+	
+	fmt.Println()
+	fmt.Println(l.color(BrightCyan, "  ╔═══════════════════════════════════════════════════════════════╗"))
+	fmt.Println(l.color(BrightCyan, "  ║") + l.color(BrightGreen+Bold, "                    ✨ CRAWL COMPLETE ✨                       ") + l.color(BrightCyan, "║"))
+	fmt.Println(l.color(BrightCyan, "  ╠═══════════════════════════════════════════════════════════════╣"))
+	
+	fmt.Printf(l.color(BrightCyan, "  ║")+"  📄 Pages Scraped:    %-40s"+l.color(BrightCyan, "║")+"\n", l.color(BrightGreen+Bold, fmt.Sprintf("%d", stats.PagesScraped)))
+	fmt.Printf(l.color(BrightCyan, "  ║")+"  ❌ Errors:           %-40s"+l.color(BrightCyan, "║")+"\n", l.color(Yellow, fmt.Sprintf("%d", stats.Errors)))
+	fmt.Printf(l.color(BrightCyan, "  ║")+"  ⏱️  Duration:         %-40s"+l.color(BrightCyan, "║")+"\n", l.color(Cyan, duration.String()))
+	fmt.Printf(l.color(BrightCyan, "  ║")+"  ⚡ Speed:            %-40s"+l.color(BrightCyan, "║")+"\n", l.color(Cyan, fmt.Sprintf("%.1f pages/sec", stats.PagesPerSecond)))
+	
+	if stats.TotalSize > 0 {
+		fmt.Printf(l.color(BrightCyan, "  ║")+"  📦 Total Size:       %-40s"+l.color(BrightCyan, "║")+"\n", l.color(Cyan, humanizeBytes(stats.TotalSize)))
+	}
+	
+	fmt.Println(l.color(BrightCyan, "  ╠═══════════════════════════════════════════════════════════════╣"))
+	
+	// HTTP Status breakdown
+	fmt.Println(l.color(BrightCyan, "  ║") + l.color(White+Bold, "  HTTP Status Breakdown:                                      ") + l.color(BrightCyan, "║"))
+	for code, count := range stats.StatusCodes {
+		emoji := statusEmoji(code)
+		color := l.getStatusColor(code)
+		fmt.Printf(l.color(BrightCyan, "  ║")+"     %s %s: %-46s"+l.color(BrightCyan, "║")+"\n", emoji, l.color(color, fmt.Sprintf("%d", code)), l.color(color, fmt.Sprintf("%d", count)))
+	}
+	
+	fmt.Println(l.color(BrightCyan, "  ╚═══════════════════════════════════════════════════════════════╝"))
+	fmt.Println()
+}
+
+type SummaryStats struct {
+	PagesScraped   int
+	Errors         int
+	Duration       time.Duration
+	PagesPerSecond float64
+	TotalSize      int64
+	StatusCodes    map[int]int
+}
+
+// ─────────────────────────────────────────────
+//  Exported Result Type
+// ─────────────────────────────────────────────
+
+type ScrapedPageResult struct {
+	URL           string    `json:"url"`
+	Title         string    `json:"title"`
+	H1            string    `json:"h1,omitempty"`
+	Description   string    `json:"description,omitempty"`
+	Keywords      string    `json:"keywords,omitempty"`
+	Author        string    `json:"author,omitempty"`
+	PublishedDate string    `json:"published_date,omitempty"`
+	OGImage       string    `json:"og_image,omitempty"`
+	BodyText      string    `json:"body_text,omitempty"`
+	StatusCode    int       `json:"status_code"`
+	ContentType   string    `json:"content_type,omitempty"`
+	ContentLength int64     `json:"content_length"`
+	LoadTimeMs    int64     `json:"load_time_ms"`
+	LinksCount    int       `json:"links_count"`
+	ImagesCount   int       `json:"images_count"`
+	Depth         int       `json:"depth"`
+	ScrapedAt     time.Time `json:"scraped_at"`
+}
+
+func ToScrapedPageResults(pages []models.ScrapedPage) []ScrapedPageResult {
+	results := make([]ScrapedPageResult, len(pages))
+	for i, p := range pages {
+		results[i] = ScrapedPageResult{
+			URL:           p.URL,
+			Title:         p.Title,
+			H1:            p.H1,
+			Description:   p.Description,
+			Keywords:      p.Keywords,
+			Author:        p.Author,
+			PublishedDate: p.PublishedDate,
+			OGImage:       p.OGImage,
+			BodyText:      p.BodyText,
+			StatusCode:    p.StatusCode,
+			ContentType:   p.ContentType,
+			ContentLength: p.ContentLength,
+			LoadTimeMs:    p.LoadTimeMs,
+			LinksCount:    p.LinksCount,
+			ImagesCount:   p.ImagesCount,
+			Depth:         p.Depth,
+			ScrapedAt:     p.ScrapedAt,
+		}
+	}
+	return results
+}
+
+
+
 
 // ─────────────────────────────────────────────
 //  Run — Main Pipeline
 // ─────────────────────────────────────────────
 
-// Run executes the full crawl pipeline
 func (c *Core) Run() ([]models.ScrapedPage, error) {
 	c.startTime = time.Now()
-
-	// Phase 1: Start web server in background (immediately)
-	if !c.config.DisableWeb {
-		c.startWebServer()
-		// Give server a moment to bind
-		time.Sleep(100 * time.Millisecond)
-	}
 
 	// Validate target URL
 	targetURL, err := c.validateTargetURL()
@@ -216,31 +528,26 @@ func (c *Core) Run() ([]models.ScrapedPage, error) {
 		return nil, fmt.Errorf("invalid target URL: %w", err)
 	}
 
-	c.broadcast(models.WebSocketMessage{
-		Type: "status",
-		Data: map[string]interface{}{
-			"phase":   "initializing",
-			"message": fmt.Sprintf("Starting crawl for %s", targetURL),
-		},
-	})
-
-	// Phase 2: Determine crawl strategy
-	strategy, sitemapURLs, err := c.determineCrawlStrategy(targetURL)
-	if err != nil {
-		c.logVerbose("Strategy determination warning: %v", err)
+	// If chunker is disabled, show header
+	if !c.config.EnableChunker {
+		c.logger.Header()
+		c.logger.Phase("init", fmt.Sprintf("Target: %s", targetURL))
+		c.logger.Info("Max pages: %d | Concurrency: %d | Timeout: %s", 
+			c.config.MaxPages, c.config.Concurrency, c.config.Timeout)
 	}
 
-	c.broadcast(models.WebSocketMessage{
-		Type: "strategy",
-		Data: map[string]interface{}{
-			"mode":         strategy,
-			"sitemapCount": len(sitemapURLs),
-		},
-	})
+	// Determine crawl strategy
+	strategy, sitemapURLs, err := c.determineCrawlStrategy(targetURL)
+	if err != nil {
+		c.logger.Verbose("Strategy determination warning: %v", err)
+	}
 
-	// Phase 3: Execute crawl based on strategy
+	// Execute crawl based on strategy
 	switch strategy {
 	case "sitemap":
+		if c.config.EnableChunker {
+			return c.executeChunkedSitemapCrawl(targetURL, sitemapURLs)
+		}
 		return c.executeSitemapCrawl(targetURL, sitemapURLs)
 	case "recursive":
 		return c.executeRecursiveCrawl(targetURL)
@@ -249,34 +556,63 @@ func (c *Core) Run() ([]models.ScrapedPage, error) {
 	}
 }
 
+
+
 // ─────────────────────────────────────────────
-//  Web Server
+//  Chunked Sitemap Crawl
 // ─────────────────────────────────────────────
 
-// startWebServer initializes and runs the web dashboard in background
-func (c *Core) startWebServer() {
-	c.webServer = web.NewServer(c.config.WebPort)
-
-	go func() {
-		addr := fmt.Sprintf(":%d", c.config.WebPort)
-		c.logVerbose("Starting web dashboard on http://localhost%s", addr)
-
-		if err := c.webServer.Start(); err != nil && err != http.ErrServerClosed {
-			log.Printf("Web server error: %v", err)
-		}
-	}()
-
-	// Log dashboard URL
-	fmt.Printf("\n🌐 Dashboard: http://localhost:%d\n\n", c.config.WebPort)
+func (c *Core) executeChunkedSitemapCrawl(baseURL string, entries []models.SitemapEntry) ([]models.ScrapedPage, error) {
+	// Limit entries to MaxPages
+	if c.config.MaxPages > 0 && len(entries) > c.config.MaxPages {
+		entries = entries[:c.config.MaxPages]
+	}
+	
+	// Create chunker
+	c.chunker = chunker.New(chunker.Config{
+		ChunkSize:   c.config.ChunkSize,
+		MaxWorkers:  c.config.MaxWorkers,
+		Concurrency: c.config.Concurrency,
+		Delay:       c.config.Delay,
+		Timeout:     c.config.Timeout,
+		Headless:    c.config.Headless,
+		Verbose:     c.config.Verbose,
+		NoColor:     c.config.NoColor,
+	})
+	
+	// Set callbacks
+	c.chunker.OnPageScraped(func(page models.ScrapedPage, chunkID int) {
+		c.mu.Lock()
+		c.stats.PagesScraped++
+		c.mu.Unlock()
+	})
+	
+	c.chunker.OnError(func(err chunker.WorkerError) {
+		c.mu.Lock()
+		c.stats.Errors++
+		c.mu.Unlock()
+	})
+	
+	// Split into chunks
+	c.chunker.SplitEntries(entries)
+	
+	// Process all chunks in parallel
+	results, err := c.chunker.Process(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	
+	c.mu.Lock()
+	c.results = results
+	c.mu.Unlock()
+	
+	return results, nil
 }
-
 // ─────────────────────────────────────────────
 //  URL Validation
 // ─────────────────────────────────────────────
 
-// validateTargetURL validates and normalizes the target URL
 func (c *Core) validateTargetURL() (string, error) {
-	// If direct sitemap URL provided, extract base domain
 	if c.config.SitemapURL != "" {
 		parsed, err := url.Parse(c.config.SitemapURL)
 		if err != nil {
@@ -289,7 +625,6 @@ func (c *Core) validateTargetURL() (string, error) {
 		return "", fmt.Errorf("no target URL specified")
 	}
 
-	// Ensure URL has scheme
 	targetURL := c.config.TargetURL
 	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
 		targetURL = "https://" + targetURL
@@ -311,17 +646,14 @@ func (c *Core) validateTargetURL() (string, error) {
 //  Crawl Strategy
 // ─────────────────────────────────────────────
 
-// determineCrawlStrategy decides between sitemap and recursive crawling
 func (c *Core) determineCrawlStrategy(targetURL string) (string, []models.SitemapEntry, error) {
-	// If force recursive mode, skip sitemap discovery
 	if c.config.ForceRecursive {
-		c.logVerbose("Forced recursive mode - skipping sitemap discovery")
+		c.logger.Info("Forced recursive mode - skipping sitemap discovery")
 		return "recursive", nil, nil
 	}
 
-	// If direct sitemap URL provided, use it
 	if c.config.SitemapURL != "" {
-		c.logVerbose("Direct sitemap URL provided: %s", c.config.SitemapURL)
+		c.logger.Verbose("Direct sitemap URL provided: %s", c.config.SitemapURL)
 		entries, err := c.fetchSitemapEntries(c.config.SitemapURL)
 		if err != nil {
 			return "recursive", nil, fmt.Errorf("failed to fetch provided sitemap: %w", err)
@@ -332,77 +664,50 @@ func (c *Core) determineCrawlStrategy(targetURL string) (string, []models.Sitema
 		return "recursive", nil, fmt.Errorf("provided sitemap was empty")
 	}
 
-	// Auto-discovery: Try to find sitemaps (DEFAULT BEHAVIOR)
-	c.broadcast(models.WebSocketMessage{
-		Type: "status",
-		Data: map[string]interface{}{
-			"phase":   "discovery",
-			"message": "Searching for sitemaps...",
-		},
-	})
+	// Auto-discovery
+	c.logger.Phase("discovery", "Searching for sitemaps...")
 
 	parser := sitemap.NewParser(c.config.Timeout, c.config.Verbose)
-
-	// Discover sitemaps from robots.txt and common locations
 	sitemapURLs, err := parser.DiscoverSitemaps(targetURL)
 	if err != nil {
-		c.logVerbose("Sitemap discovery error: %v", err)
+		c.logger.Verbose("Sitemap discovery error: %v", err)
 	}
 
 	if len(sitemapURLs) == 0 {
-		c.logVerbose("No sitemaps found - falling back to recursive crawl")
-		c.broadcast(models.WebSocketMessage{
-			Type: "status",
-			Data: map[string]interface{}{
-				"phase":   "discovery",
-				"message": "No sitemaps found - using recursive crawl",
-			},
-		})
+		c.logger.Warning("No sitemaps found - falling back to recursive crawl")
 		return "recursive", nil, nil
 	}
 
-	c.logVerbose("Found %d sitemap(s)", len(sitemapURLs))
+	c.logger.Success("Found %d sitemap(s)", len(sitemapURLs))
 
 	// Parse all discovered sitemaps
 	var allEntries []models.SitemapEntry
 	for _, sitemapURL := range sitemapURLs {
+		c.logger.Verbose("Parsing: %s", sitemapURL)
 		entries, err := c.fetchSitemapEntries(sitemapURL)
 		if err != nil {
-			c.logVerbose("Failed to parse sitemap %s: %v", sitemapURL, err)
+			c.logger.Verbose("Failed to parse sitemap %s: %v", sitemapURL, err)
 			continue
 		}
 		allEntries = append(allEntries, entries...)
 	}
 
 	if len(allEntries) == 0 {
-		c.logVerbose("All sitemaps were empty - falling back to recursive crawl")
+		c.logger.Warning("All sitemaps were empty - falling back to recursive crawl")
 		return "recursive", nil, nil
 	}
 
-	// Apply filters
 	filteredEntries := c.filterSitemapEntries(allEntries)
-
-	c.broadcast(models.WebSocketMessage{
-		Type: "sitemap_stats",
-		Data: map[string]interface{}{
-			"totalUrls":    len(allEntries),
-			"filteredUrls": len(filteredEntries),
-			"sitemaps":     len(sitemapURLs),
-		},
-	})
-
-	fmt.Printf("📍 Found %d URLs in sitemap(s), %d after filtering\n", len(allEntries), len(filteredEntries))
+	c.logger.SitemapStats(len(allEntries), len(filteredEntries), len(sitemapURLs))
 
 	return "sitemap", filteredEntries, nil
 }
 
-// fetchSitemapEntries fetches and parses a single sitemap
 func (c *Core) fetchSitemapEntries(sitemapURL string) ([]models.SitemapEntry, error) {
 	parser := sitemap.NewParser(c.config.Timeout, c.config.Verbose)
 	return parser.ParseSitemap(sitemapURL)
 }
 
-// filterSitemapEntries applies priority and regex filters
 func (c *Core) filterSitemapEntries(entries []models.SitemapEntry) []models.SitemapEntry {
 	var filtered []models.SitemapEntry
 
@@ -411,22 +716,18 @@ func (c *Core) filterSitemapEntries(entries []models.SitemapEntry) []models.Site
 		var err error
 		urlRegex, err = regexp.Compile(c.config.URLPattern)
 		if err != nil {
-			c.logVerbose("Invalid URL pattern regex: %v", err)
+			c.logger.Warning("Invalid URL pattern regex: %v", err)
 			urlRegex = nil
 		}
 	}
 
 	for _, entry := range entries {
-		// Priority filter
 		if c.config.MinPriority > 0 && entry.Priority < c.config.MinPriority {
 			continue
 		}
-
-		// URL pattern filter
 		if urlRegex != nil && !urlRegex.MatchString(entry.URL) {
 			continue
 		}
-
 		filtered = append(filtered, entry)
 	}
 
@@ -437,34 +738,22 @@ func (c *Core) filterSitemapEntries(entries []models.SitemapEntry) []models.Site
 //  Crawl Execution
 // ─────────────────────────────────────────────
 
-// executeSitemapCrawl crawls URLs discovered from sitemaps
 func (c *Core) executeSitemapCrawl(baseURL string, entries []models.SitemapEntry) ([]models.ScrapedPage, error) {
-	c.logVerbose("Starting sitemap-based crawl with %d URLs", len(entries))
+	c.logger.Phase("crawling", fmt.Sprintf("Sitemap mode: %d URLs to process", len(entries)))
 
-	c.broadcast(models.WebSocketMessage{
-		Type: "status",
-		Data: map[string]interface{}{
-			"phase":   "crawling",
-			"message": fmt.Sprintf("Crawling %d URLs from sitemap", len(entries)),
-			"mode":    "sitemap",
-		},
-	})
-
-	// Convert entries to URL list
 	urls := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		urls = append(urls, entry.URL)
 	}
 
-	// Limit to MaxPages
 	if c.config.MaxPages > 0 && len(urls) > c.config.MaxPages {
 		urls = urls[:c.config.MaxPages]
+		c.logger.Info("Limited to %d pages (max pages setting)", c.config.MaxPages)
 	}
 
-	// Create and configure crawler
 	c.crawler = crawler.NewCrawler(crawler.Config{
 		MaxPages:    c.config.MaxPages,
-		MaxDepth:    1, // Sitemap URLs are flat
+		MaxDepth:    1,
 		Concurrency: c.config.Concurrency,
 		Delay:       c.config.Delay,
 		Timeout:     c.config.Timeout,
@@ -472,15 +761,12 @@ func (c *Core) executeSitemapCrawl(baseURL string, entries []models.SitemapEntry
 		SitemapMode: true,
 	})
 
-	// Set up callbacks
 	c.setupCrawlerCallbacks()
 
-	// Queue all sitemap URLs
 	for _, u := range urls {
 		c.crawler.QueueURL(u, 0)
 	}
 
-	// Execute crawl
 	results, err := c.crawler.Crawl(baseURL)
 	if err != nil {
 		return nil, err
@@ -495,20 +781,9 @@ func (c *Core) executeSitemapCrawl(baseURL string, entries []models.SitemapEntry
 	return results, nil
 }
 
-// executeRecursiveCrawl performs traditional link-following crawl
 func (c *Core) executeRecursiveCrawl(targetURL string) ([]models.ScrapedPage, error) {
-	c.logVerbose("Starting recursive crawl from %s", targetURL)
+	c.logger.Phase("crawling", fmt.Sprintf("Recursive mode from %s", targetURL))
 
-	c.broadcast(models.WebSocketMessage{
-		Type: "status",
-		Data: map[string]interface{}{
-			"phase":   "crawling",
-			"message": fmt.Sprintf("Recursive crawl starting from %s", targetURL),
-			"mode":    "recursive",
-		},
-	})
-
-	// Create and configure crawler
 	c.crawler = crawler.NewCrawler(crawler.Config{
 		MaxPages:    c.config.MaxPages,
 		MaxDepth:    c.config.MaxDepth,
@@ -519,10 +794,8 @@ func (c *Core) executeRecursiveCrawl(targetURL string) ([]models.ScrapedPage, er
 		SitemapMode: false,
 	})
 
-	// Set up callbacks
 	c.setupCrawlerCallbacks()
 
-	// Execute crawl
 	results, err := c.crawler.Crawl(targetURL)
 	if err != nil {
 		return nil, err
@@ -541,55 +814,29 @@ func (c *Core) executeRecursiveCrawl(targetURL string) ([]models.ScrapedPage, er
 //  Callbacks
 // ─────────────────────────────────────────────
 
-// setupCrawlerCallbacks configures real-time reporting callbacks
 func (c *Core) setupCrawlerCallbacks() {
 	if c.crawler == nil {
 		return
 	}
 
-	// Page scraped callback
 	c.crawler.OnPageScraped(func(page models.ScrapedPage) {
 		c.mu.Lock()
 		c.stats.PagesScraped++
 		c.mu.Unlock()
 
-		c.broadcast(models.WebSocketMessage{
-			Type: "page",
-			Data: map[string]interface{}{
-				"url":         page.URL,
-				"title":       page.Title,
-				"statusCode":  page.StatusCode,
-				"contentType": page.ContentType,
-				"scraped":     c.stats.PagesScraped,
-			},
-		})
+		c.logger.PageScraped(page.URL, page.Title, page.StatusCode, page.LoadTimeMs)
 	})
 
-	// Error callback
 	c.crawler.OnError(func(url string, err error) {
 		c.mu.Lock()
 		c.stats.Errors++
 		c.mu.Unlock()
 
-		c.broadcast(models.WebSocketMessage{
-			Type: "error",
-			Data: map[string]interface{}{
-				"url":   url,
-				"error": err.Error(),
-			},
-		})
+		c.logger.PageError(url, err)
 	})
 
-	// Link discovered callback
 	c.crawler.OnLinkDiscovered(func(link models.DiscoveredLink) {
-		c.broadcast(models.WebSocketMessage{
-			Type: "link",
-			Data: map[string]interface{}{
-				"url":    link.URL,
-				"source": link.SourceURL,
-				"depth":  link.Depth,
-			},
-		})
+		c.logger.LinkDiscovered(link.URL, link.Depth)
 	})
 }
 
@@ -597,68 +844,101 @@ func (c *Core) setupCrawlerCallbacks() {
 //  Finalization & Utilities
 // ─────────────────────────────────────────────
 
-// finalizeCrawl sends completion message and stats
 func (c *Core) finalizeCrawl() {
 	duration := time.Since(c.startTime)
 
 	c.mu.RLock()
 	stats := *c.stats
-	resultCount := len(c.results)
+	results := c.results
 	c.mu.RUnlock()
 
-	c.broadcast(models.WebSocketMessage{
-		Type: "complete",
-		Data: map[string]interface{}{
-			"pagesScraped": stats.PagesScraped,
-			"errors":       stats.Errors,
-			"duration":     duration.String(),
-			"durationMs":   duration.Milliseconds(),
-			"totalResults": resultCount,
-		},
+	// Calculate summary stats
+	statusCodes := make(map[int]int)
+	var totalSize int64
+	for _, r := range results {
+		statusCodes[r.StatusCode]++
+		totalSize += r.ContentLength
+	}
+
+	pagesPerSec := float64(stats.PagesScraped) / duration.Seconds()
+	if duration.Seconds() == 0 {
+		pagesPerSec = float64(stats.PagesScraped)
+	}
+
+	c.logger.Phase("complete", "Crawl finished successfully")
+	c.logger.Summary(SummaryStats{
+		PagesScraped:   stats.PagesScraped,
+		Errors:         stats.Errors,
+		Duration:       duration,
+		PagesPerSecond: pagesPerSec,
+		TotalSize:      totalSize,
+		StatusCodes:    statusCodes,
 	})
-
-	fmt.Printf("\n✅ Crawl complete: %d pages in %s\n", resultCount, duration.Round(time.Millisecond))
-}
-
-// broadcast sends a message to all connected WebSocket clients
-func (c *Core) broadcast(msg models.WebSocketMessage) {
-	if c.webServer != nil {
-		c.webServer.Broadcast(msg)
-	}
-}
-
-// logVerbose logs a message if verbose mode is enabled
-func (c *Core) logVerbose(format string, args ...interface{}) {
-	if c.config.Verbose {
-		log.Printf("[CORE] "+format, args...)
-	}
 }
 
 // ─────────────────────────────────────────────
 //  Public Accessors & Lifecycle
 // ─────────────────────────────────────────────
 
-// Stop gracefully shuts down the core
 func (c *Core) Stop() {
 	c.cancel()
 	if c.crawler != nil {
 		c.crawler.Stop()
 	}
-	if c.webServer != nil {
-		c.webServer.Stop()
-	}
 }
 
-// GetResults returns the crawl results
 func (c *Core) GetResults() []models.ScrapedPage {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.results
 }
 
-// GetStats returns current crawl statistics
 func (c *Core) GetStats() models.CrawlStats {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return *c.stats
+}
+
+// ─────────────────────────────────────────────
+//  Helper Functions
+// ─────────────────────────────────────────────
+
+func truncateString(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+func humanizeBytes(b int64) string {
+	if b == 0 {
+		return "0 B"
+	}
+	units := []string{"B", "KB", "MB", "GB"}
+	f := float64(b)
+	i := 0
+	for f >= 1024 && i < len(units)-1 {
+		f /= 1024
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%d B", b)
+	}
+	return fmt.Sprintf("%.1f %s", f, units[i])
+}
+
+func statusEmoji(code int) string {
+	switch {
+	case code >= 200 && code < 300:
+		return "✅"
+	case code >= 300 && code < 400:
+		return "↗️"
+	case code >= 400 && code < 500:
+		return "⚠️"
+	case code >= 500:
+		return "🔴"
+	default:
+		return "❓"
+	}
 }

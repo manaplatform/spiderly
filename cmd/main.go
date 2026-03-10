@@ -1,75 +1,134 @@
+// cmd/spiderly/main.go
 package main
 
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
-	"math"
 	"os"
-	"sort"
-	"strings"
 	"time"
-
+	"math"
+	"strings"
+	"sort"
 	"spiderly/internal/core"
 )
 
 func main() {
+	// Flags
 	targetURL := flag.String("url", "", "Target URL to crawl")
 	maxPages := flag.Int("pages", 100, "Maximum number of pages to scrape")
+	maxDepth := flag.Int("depth", 10, "Maximum crawl depth")
+	concurrency := flag.Int("concurrency", 5, "Concurrent requests per worker")
+	timeout := flag.Duration("timeout", 30*time.Second, "Request timeout")
+	delay := flag.Duration("delay", 200*time.Millisecond, "Delay between requests")
 	outputFile := flag.String("output", "", "Path for JSON output file")
 	markdownFile := flag.String("markdown", "", "Path for Markdown output file")
+	forceRecursive := flag.Bool("recursive", false, "Force recursive crawl (skip sitemap)")
+	verbose := flag.Bool("verbose", false, "Enable verbose logging")
+	noColor := flag.Bool("no-color", false, "Disable colored output")
+	
+	// Chunker flags
+	chunked := flag.Bool("chunked", false, "Enable parallel chunked processing")
+	chunkSize := flag.Int("chunk-size", 50, "URLs per chunk")
+	workers := flag.Int("workers", 4, "Number of parallel workers")
+	
 	flag.Parse()
 
 	if *targetURL == "" {
-		fmt.Println("Usage: spiderly -url <target> [options]")
-		fmt.Println()
-		flag.PrintDefaults()
+		printUsage()
 		os.Exit(1)
 	}
 
-	target := *targetURL
+	// Create core with config
+	e := core.NewCore(core.CoreConfig{
+		TargetURL:      *targetURL,
+		MaxPages:       *maxPages,
+		MaxDepth:       *maxDepth,
+		Concurrency:    *concurrency,
+		Timeout:        *timeout,
+		Delay:          *delay,
+		ForceRecursive: *forceRecursive,
+		Verbose:        *verbose,
+		NoColor:        *noColor,
+		EnableChunker:  *chunked,
+		ChunkSize:      *chunkSize,
+		MaxWorkers:     *workers,
+	})
 
-	e := core.New(target, *maxPages)
-
+	// Run crawl
 	results, err := e.Run()
 	if err != nil {
-		log.Fatalf("❌ Crawl failed: %v", err)
+		fmt.Printf("\n❌ Crawl failed: %v\n", err)
+		os.Exit(1)
 	}
 
-	// Convert internal models to exported ScrapedPageResult
+	// Convert to exported format
 	exported := core.ToScrapedPageResults(results)
 
+	// Save outputs
 	if *outputFile != "" {
 		if err := saveJSON(exported, *outputFile); err != nil {
-			log.Printf("⚠️  Failed to save JSON: %v", err)
+			fmt.Printf("⚠️  Failed to save JSON: %v\n", err)
 		} else {
-			log.Printf("✅ JSON saved to %s", *outputFile)
+			fmt.Printf("📁 JSON saved to %s\n", *outputFile)
 		}
 	}
 
 	if *markdownFile != "" {
-		if err := saveMarkdown(exported, *markdownFile, target); err != nil {
-			log.Printf("⚠️  Failed to save Markdown: %v", err)
+		if err := saveMarkdown(exported, *markdownFile, *targetURL); err != nil {
+			fmt.Printf("⚠️  Failed to save Markdown: %v\n", err)
 		} else {
-			log.Printf("✅ Markdown saved to %s", *markdownFile)
+			fmt.Printf("📁 Markdown saved to %s\n", *markdownFile)
 		}
 	}
-
-	printSummary(exported)
 }
 
-// ─────────────────────────────────────────────
-//  JSON Export
-// ─────────────────────────────────────────────
+func printUsage() {
+	fmt.Println()
+	fmt.Println("  🕷️  SPIDERLY - High Performance Web Crawler")
+	fmt.Println()
+	fmt.Println("  Usage: spiderly -url <target> [options]")
+	fmt.Println()
+	fmt.Println("  Basic Options:")
+	fmt.Println("    -url string        Target URL to crawl (required)")
+	fmt.Println("    -pages int         Maximum pages to scrape (default: 100)")
+	fmt.Println("    -depth int         Maximum crawl depth (default: 10)")
+	fmt.Println("    -concurrency int   Concurrent requests per worker (default: 5)")
+	fmt.Println("    -timeout duration  Request timeout (default: 30s)")
+	fmt.Println("    -delay duration    Delay between requests (default: 200ms)")
+	fmt.Println()
+	fmt.Println("  Chunker Options (Parallel Processing):")
+	fmt.Println("    -chunked           Enable parallel chunked processing")
+	fmt.Println("    -chunk-size int    URLs per chunk (default: 50)")
+	fmt.Println("    -workers int       Number of parallel workers (default: 4)")
+	fmt.Println()
+	fmt.Println("  Output Options:")
+	fmt.Println("    -output string     Path for JSON output file")
+	fmt.Println("    -markdown string   Path for Markdown output file")
+	fmt.Println()
+	fmt.Println("  Other Options:")
+	fmt.Println("    -recursive         Force recursive crawl (skip sitemap)")
+	fmt.Println("    -verbose           Enable verbose logging")
+	fmt.Println("    -no-color          Disable colored output")
+	fmt.Println()
+	fmt.Println("  Examples:")
+	fmt.Println("    spiderly -url example.com")
+	fmt.Println("    spiderly -url example.com -chunked -workers 8")
+	fmt.Println("    spiderly -url example.com -pages 500 -chunked -chunk-size 100 -workers 5")
+	fmt.Println("    spiderly -url example.com -output results.json -verbose")
+	fmt.Println()
+}
 
 func saveJSON(pages []core.ScrapedPageResult, path string) error {
 	data, err := json.MarshalIndent(pages, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal JSON: %w", err)
 	}
-	return writeFile(path, data)
+	return os.WriteFile(path, data, 0644)
 }
+
+// [saveMarkdown and helper functions remain the same as before...]
+
 
 // ─────────────────────────────────────────────
 //  Markdown Export
