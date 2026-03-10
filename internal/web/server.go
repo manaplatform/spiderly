@@ -1,101 +1,338 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
+	"time"
+
+	"spiderly/internal/models"
 )
 
-// Server holds the HTTP server and WebSocket hub
+// Server represents the web dashboard server
 type Server struct {
-	Hub  *Hub
-	Port int
+	hub  *Hub
+	port int
 }
 
-// NewServer creates a new web server
+// NewServer creates a new dashboard server
 func NewServer(port int) *Server {
-	hub := NewHub()
-
 	return &Server{
-		Hub:  hub,
-		Port: port,
+		hub:  NewHub(),
+		port: port,
 	}
 }
 
-// Start begins serving HTTP and WebSocket connections
-func (s *Server) Start() {
-	go s.Hub.Run()
+// Start starts the web server
+func (s *Server) Start() error {
+	go s.hub.Run()
 
-	// Serve the HTML dashboard
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(DashboardHTML))
-	})
+	http.HandleFunc("/", s.handleDashboard)
+	http.HandleFunc("/ws", s.handleWebSocket)
 
-	// WebSocket endpoint
-	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		HandleWebSocket(s.Hub, w, r)
-	})
-
-	addr := fmt.Sprintf(":%d", s.Port)
-	log.Printf("🌐 Dashboard: http://localhost%s", addr)
-	log.Printf("🔌 WebSocket: ws://localhost%s/ws", addr)
-
-	go func() {
-		if err := http.ListenAndServe(addr, nil); err != nil {
-			log.Fatalf("Server error: %v", err)
-		}
-	}()
+	addr := fmt.Sprintf(":%d", s.port)
+	return http.ListenAndServe(addr, nil)
 }
 
-// DashboardHTML is the full HTML for the live dashboard
-var DashboardHTML = `<!DOCTYPE html>
+// GetHub returns the WebSocket hub
+func (s *Server) GetHub() *Hub {
+	return s.hub
+}
+
+// GetPort returns the server port
+func (s *Server) GetPort() int {
+	return s.port
+}
+
+// BroadcastNews sends a news item to all connected clients
+func (s *Server) BroadcastNews(news models.News) {
+	msg := models.WebSocketMessage{
+		Type:    "news",
+		Payload: news,
+	}
+	s.broadcastJSON(msg)
+}
+
+// BroadcastLog sends a log entry to all connected clients
+func (s *Server) BroadcastLog(level, message string) {
+	msg := models.WebSocketMessage{
+		Type: "log",
+		Payload: models.LogEntry{
+			Level:     level,
+			Message:   message,
+			Timestamp: time.Now(),
+		},
+	}
+	s.broadcastJSON(msg)
+}
+
+// BroadcastStats sends stats to all connected clients
+func (s *Server) BroadcastStats(stats models.CrawlStats) {
+	msg := models.WebSocketMessage{
+		Type:    "stats",
+		Payload: stats,
+	}
+	s.broadcastJSON(msg)
+}
+
+// BroadcastLink sends a discovered link to all connected clients
+func (s *Server) BroadcastLink(link models.DiscoveredLink) {
+	msg := models.WebSocketMessage{
+		Type:    "link",
+		Payload: link,
+	}
+	s.broadcastJSON(msg)
+}
+
+// BroadcastProgress sends progress update to all connected clients
+func (s *Server) BroadcastProgress(progress float64) {
+	msg := models.WebSocketMessage{
+		Type:    "progress",
+		Payload: progress,
+	}
+	s.broadcastJSON(msg)
+}
+
+func (s *Server) broadcastJSON(msg models.WebSocketMessage) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	s.hub.Broadcast(data)
+}
+
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	s.hub.HandleWebSocket(w, r)
+}
+
+func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, dashboardHTML)
+}
+
+const dashboardHTML = `<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Spiderly - داشبورد خزشگر وب</title>
+    <title>🕷️ Spiderly Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;700;900&display=swap');
-        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
-
-        :root {
-            --bg-primary: #0a0e17;
-            --bg-secondary: #111827;
-            --bg-card: #1a2332;
-            --bg-card-hover: #1f2b3d;
-            --border: #1e3a2f;
-            --border-glow: #00ff8855;
-            --green-primary: #00ff88;
-            --green-secondary: #00cc6a;
-            --green-dim: #00ff8833;
-            --green-dark: #003d20;
-            --text-primary: #e0ffe8;
-            --text-secondary: #88c0a0;
-            --text-muted: #4a6858;
-            --red: #ff4444;
-            --red-dim: #ff444433;
-            --yellow: #ffcc00;
-            --yellow-dim: #ffcc0033;
-            --blue: #00aaff;
-            --blue-dim: #00aaff33;
-            --font-persian: 'Vazirmatn', sans-serif;
-            --font-mono: 'JetBrains Mono', monospace;
-        }
-
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
 
+        :root {
+            --bg-primary: #0a0f0a;
+            --bg-secondary: #0d1a0d;
+            --bg-tertiary: #112211;
+            --text-primary: #00ff00;
+            --text-secondary: #00cc00;
+            --text-dim: #008800;
+            --accent: #00ff88;
+            --error
+		}
+			
         body {
-            font-family: var(--font-persian);
+            font-family: 'Vazirmatn', 'Courier New', monospace;
             background: var(--bg-primary);
             color: var(--text-primary);
             min-height: 100vh;
             overflow-x: hidden;
         }
+
+        /* Scanline effect */
+        body::before {
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.15),
+                rgba(0, 0, 0, 0.15) 1px,
+                transparent 1px,
+                transparent 2px
+            );
+            pointer-events: none;
+            z-index: 1000;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            padding: 30px;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 20px;
+            position: relative;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            text-shadow: 0 0 20px var(--text-primary);
+            animation: glow 2s ease-in-out infinite alternate;
+        }
+
+        .mode-badge {
+            display: inline-block;
+            padding: 5px 15px;
+            margin-top: 10px;
+            border-radius: 15px;
+            font-size: 0.9rem;
+            font-weight: bold;
+        }
+
+        .mode-badge.recursive {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--text-primary);
+            color: var(--text-primary);
+        }
+
+        .mode-badge.sitemap {
+            background: rgba(0, 255, 255, 0.1);
+            border: 1px solid var(--sitemap);
+            color: var(--sitemap);
+        }
+
+        @keyframes glow {
+            from { text-shadow: 0 0 20px var(--text-primary), 0 0 30px var(--text-primary); }
+            to { text-shadow: 0 0 30px var(--text-primary), 0 0 40px var(--accent); }
+        }
+
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            border-color: var(--text-primary);
+            box-shadow: 0 0 15px rgba(0, 255, 0, 0.2);
+        }
+
+        .stat-card.sitemap-stat {
+            border-color: var(--sitemap);
+        }
+
+        .stat-card.sitemap-stat:hover {
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.3);
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: var(--accent);
+        }
+
+        .stat-card.sitemap-stat .stat-value {
+            color: var(--sitemap);
+        }
+
+        .stat-label {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            margin-top: 5px;
+        }
+
+        /* Progress Bar */
+        .progress-container {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .progress-bar {
+            height: 30px;
+            background: var(--bg-tertiary);
+            border-radius: 15px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--text-dim), var(--text-primary), var(--accent));
+            border-radius: 15px;
+            transition: width 0.5s ease;
+            position: relative;
+        }
+
+        .progress-fill::after {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(
+                90deg,
+                transparent,
+                rgba(255, 255, 255, 0.2),
+                transparent
+            );
+            animation: shimmer 2s infinite;
+        }
+
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+
+        .progress-text {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 0.9rem;
+        }
+
+        .current-url {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            margin-top: 5px;
+            word-break: break-all;
+        }
+
+        /* Main Grid */
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 1200px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Panels */
+        .panel {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+
 
         /* Scrollbar */
         ::-webkit-scrollbar { width: 6px; }

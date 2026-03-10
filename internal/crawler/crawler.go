@@ -8,371 +8,453 @@ import (
 	"sync"
 	"time"
 
-	"spiderly/internal/models"
-	"spiderly/internal/web"
-
 	"github.com/PuerkitoBio/goquery"
 	"github.com/chromedp/chromedp"
+
+	"spiderly/internal/models"
+	"spiderly/internal/sitemap"
 )
+
+// Crawler handles web crawling operations
+type Crawler struct {
+	config     Config
+	visited    map[string]bool
+	visitedMu  sync.RWMutex
+	queue      []QueueItem
+	queueMu    sync.Mutex
+	
+	// Sitemap parser
+	sitemapParser *sitemap.Parser
+	sitemapURLs   []models.SitemapURL
+
+	// Callbacks
+	onNews      func(news models.News)
+	onLog       func(level, message string)
+	onStats     func(stats models.CrawlStats)
+	onLink      func(link models.DiscoveredLink)
+	onProgress  func(progress float64)
+
+	// Stats
+	stats      models.CrawlStats
+	statsMu    sync.RWMutex
+	startTime  time.Time
+}
 
 // Config holds crawler configuration
 type Config struct {
 	MaxDepth       int
 	MaxPages       int
 	Timeout        time.Duration
-	WaitTime       time.Duration
 	FollowExternal bool
-	Selectors      ContentSelectors
+	UserAgent      string
+	Delay          time.Duration
+	
+	// Sitemap mode settings
+	SitemapMode    bool
+	SitemapURL     string  // Direct sitemap URL (optional)
+	AutoDiscover   bool    // Auto-discover sitemaps from robots.txt
+	MinPriority    float64 // Minimum priority filter (0-1)
+	URLPattern     string  // Regex pattern to filter URLs
 }
 
-// ContentSelectors defines CSS selectors for content extraction
-type ContentSelectors struct {
-	Title   []string
-	Content []string
-	Summary []string
-	Author  []string
-	Date    []string
-	Tags    []string
-	Image   []string
+// QueueItem represents a URL in the crawl queue
+type QueueItem struct {
+	URL    string
+	Depth  int
+	Source string // "crawl" or "sitemap"
 }
 
-// DefaultSelectors returns common news site selectors
-func DefaultSelectors() ContentSelectors {
-	return ContentSelectors{
-		Title: []string{
-			"h1.entry-title", "h1.post-title", "h1.article-title",
-			"h1.news-title", "article h1", ".entry-title",
-			".post-title", "h1",
-		},
-		Content: []string{
-			"article .entry-content", ".post-content", ".article-content",
-			".entry-content", ".news-content", "article p",
-			".content p", "main p",
-		},
-		Summary: []string{
-			".entry-summary", ".post-excerpt", ".article-summary",
-			".lead", ".excerpt", "meta[name='description']",
-		},
-		Author: []string{
-			".author-name", ".entry-author", ".post-author",
-			"[rel='author']", ".byline",
-		},
-		Date: []string{
-			"time[datetime]", ".entry-date", ".post-date",
-			".publish-date", ".date",
-		},
-		Tags: []string{
-			".tags a", ".post-tags a", ".entry-tags a", "[rel='tag']",
-		},
-		Image: []string{
-			"article img", ".featured-image img", ".post-thumbnail img",
-		},
-	}
-}
-
-// Crawler handles web crawling operations
-type Crawler struct {
-	config     Config
-	server     *web.Server
-	visited    map[string]bool
-	visitedMux sync.RWMutex
-	baseURL    *url.URL
-	results    []models.CrawlResult
-	resultsMux sync.Mutex
-	startTime  time.Time
-}
-
-// NewCrawler creates a new Crawler instance
-func NewCrawler(config Config, server *web.Server) *Crawler {
-	if config.MaxDepth == 0 {
-		config.MaxDepth = 2
-	}
-	if config.MaxPages == 0 {
-		config.MaxPages = 10
+// NewCrawler creates a new crawler instance
+func NewCrawler(config Config) *Crawler {
+	if config.UserAgent == "" {
+		config.UserAgent = "Spiderly/1.0 (Web Crawler)"
 	}
 	if config.Timeout == 0 {
 		config.Timeout = 30 * time.Second
 	}
-	if config.WaitTime == 0 {
-		config.WaitTime = 2 * time.Second
-	}
-	if len(config.Selectors.Title) == 0 {
-		config.Selectors = DefaultSelectors()
+	if config.Delay == 0 {
+		config.Delay = 500 * time.Millisecond
 	}
 
-	return &Crawler{
+	c := &Crawler{
 		config:  config,
-		server:  server,
 		visited: make(map[string]bool),
-		results: make([]models.CrawlResult, 0),
+		queue:   make([]QueueItem, 0),
+	}
+
+	// Initialize sitemap parser if in sitemap mode
+	if config.SitemapMode {
+		c.sitemapParser = sitemap.NewParser(sitemap.ParserConfig{
+			UserAgent:   config.UserAgent,
+			MaxSitemaps: 100,
+			Timeout:     config.Timeout,
+		})
+	}
+
+	return c
+}
+
+// SetNewsCallback sets the callback for discovered news
+func (c *Crawler) SetNewsCallback(fn func(news models.News)) {
+	c.onNews = fn
+}
+
+// SetLogCallback sets the logging callback
+func (c *Crawler) SetLogCallback(fn func(level, message string)) {
+	c.onLog = fn
+	if c.sitemapParser != nil {
+		c.sitemapParser.SetLogCallback(fn)
 	}
 }
 
-// sendLog sends a log message to the dashboard
-func (c *Crawler) sendLog(level, message string) {
-	c.server.Hub.SendMessage(models.WSMessage{
-		Type: "log",
-		Payload: models.LogEntry{
-			Level:     level,
-			Message:   message,
-			Timestamp: time.Now().Format("15:04:05"),
-		},
-	})
+// SetStatsCallback sets the stats update callback
+func (c *Crawler) SetStatsCallback(fn func(stats models.CrawlStats)) {
+	c.onStats = fn
 }
 
-// sendProgress sends progress update to the dashboard
-func (c *Crawler) sendProgress(currentURL string) {
-	c.visitedMux.RLock()
-	done := len(c.visited)
-	c.visitedMux.RUnlock()
+// SetLinkCallback sets the discovered link callback
+func (c *Crawler) SetLinkCallback(fn func(link models.DiscoveredLink)) {
+	c.onLink = fn
+}
 
-	progress := float64(done) / float64(c.config.MaxPages) * 100
-	if progress > 100 {
-		progress = 100
+// SetProgressCallback sets the progress callback
+func (c *Crawler) SetProgressCallback(fn func(progress float64)) {
+	c.onProgress = fn
+}
+
+func (c *Crawler) log(level, message string) {
+	if c.onLog != nil {
+		c.onLog(level, message)
 	}
-
-	c.server.Hub.SendMessage(models.WSMessage{
-		Type: "progress",
-		Payload: models.ProgressPayload{
-			CurrentURL: currentURL,
-			Progress:   progress,
-			PagesDone:  done,
-			PagesTotal: c.config.MaxPages,
-		},
-	})
 }
 
-// sendStats sends statistics update to the dashboard
-func (c *Crawler) sendStats() {
-	totalPages, totalNews, totalLinks, errors := c.GetStats()
+func (c *Crawler) updateStats() {
+	c.statsMu.Lock()
 	elapsed := time.Since(c.startTime)
-	min := int(elapsed.Minutes())
-	sec := int(elapsed.Seconds()) % 60
+	c.stats.ElapsedTime = formatDuration(elapsed)
+	if c.stats.TotalURLs > 0 {
+		c.stats.Progress = float64(c.stats.ProcessedURLs) / float64(c.stats.TotalURLs) * 100
+	}
+	stats := c.stats
+	c.statsMu.Unlock()
 
-	c.server.Hub.SendMessage(models.WSMessage{
-		Type: "stats",
-		Payload: models.StatsPayload{
-			TotalPages:  totalPages,
-			TotalNews:   totalNews,
-			TotalLinks:  totalLinks,
-			Errors:      errors,
-			ElapsedTime: fmt.Sprintf("%02d:%02d", min, sec),
-		},
-	})
+	if c.onStats != nil {
+		c.onStats(stats)
+	}
+	if c.onProgress != nil {
+		c.onProgress(stats.Progress)
+	}
 }
 
-// Crawl starts crawling from the given URL
-func (c *Crawler) Crawl(startURL string) ([]models.CrawlResult, error) {
-	parsedURL, err := url.Parse(startURL)
-	if err != nil {
-		return nil, err
-	}
-	c.baseURL = parsedURL
+// Start begins the crawling process
+func (c *Crawler) Start(ctx context.Context, startURL string) error {
 	c.startTime = time.Now()
+	c.stats = models.CrawlStats{
+		SitemapMode: c.config.SitemapMode,
+	}
 
-	// Notify dashboard that crawling has started
-	c.server.Hub.SendMessage(models.WSMessage{Type: "started", Payload: nil})
-	c.sendLog("info", "شروع خزش از: "+startURL)
+	c.log("info", fmt.Sprintf("🕷️ Spiderly starting crawl of: %s", startURL))
+	c.log("info", fmt.Sprintf("⚙️ Mode: %s | Max Pages: %d", 
+		map[bool]string{true: "Sitemap", false: "Recursive"}[c.config.SitemapMode], 
+		c.config.MaxPages))
 
-	// Give time for WebSocket clients to connect
-	time.Sleep(2 * time.Second)
+	// If sitemap mode, discover and parse sitemaps first
+	if c.config.SitemapMode {
+		return c.startSitemapMode(ctx, startURL)
+	}
 
-	c.crawlPage(startURL, 0)
-
-	// Send final stats
-	totalPages, totalNews, totalLinks, errors := c.GetStats()
-	elapsed := time.Since(c.startTime)
-	min := int(elapsed.Minutes())
-	sec := int(elapsed.Seconds()) % 60
-
-	c.server.Hub.SendMessage(models.WSMessage{
-		Type: "finished",
-		Payload: models.StatsPayload{
-			TotalPages:  totalPages,
-			TotalNews:   totalNews,
-			TotalLinks:  totalLinks,
-			Errors:      errors,
-			ElapsedTime: fmt.Sprintf("%02d:%02d", min, sec),
-			Status:      "completed",
-		},
-	})
-
-	c.sendLog("success", fmt.Sprintf("خزش به پایان رسید! %d صفحه | %d خبر | %d لینک", totalPages, totalNews, totalLinks))
-
-	return c.results, nil
+	// Regular recursive crawl mode
+	return c.startRecursiveMode(ctx, startURL)
 }
 
-// crawlPage crawls a single page and discovers links
-func (c *Crawler) crawlPage(pageURL string, depth int) {
-	// Check if already visited
-	c.visitedMux.RLock()
-	if c.visited[pageURL] {
-		c.visitedMux.RUnlock()
-		return
+// startSitemapMode handles sitemap-based crawling
+func (c *Crawler) startSitemapMode(ctx context.Context, baseURL string) error {
+	c.log("sitemap", "🗺️ Starting sitemap discovery and parsing...")
+
+	// Setup sitemap parser callbacks
+	c.sitemapParser.SetURLFoundCallback(func(smURL models.SitemapURL, source string) {
+		if c.onLink != nil {
+			priority := ""
+			if smURL.Priority > 0 {
+				priority = fmt.Sprintf("%.1f", smURL.Priority)
+			}
+			c.onLink(models.DiscoveredLink{
+				URL:      smURL.Loc,
+				Source:   "sitemap",
+				Priority: priority,
+				LastMod:  smURL.LastMod,
+			})
+		}
+	})
+
+	c.sitemapParser.SetSitemapFoundCallback(func(url string) {
+		c.statsMu.Lock()
+		c.stats.SitemapsFound++
+		c.statsMu.Unlock()
+		c.updateStats()
+	})
+
+	// Parse sitemaps
+	var result *models.SitemapResult
+	var err error
+
+	if c.config.SitemapURL != "" {
+		// Parse specific sitemap URL
+		c.log("info", fmt.Sprintf("📍 Parsing specific sitemap: %s", c.config.SitemapURL))
+		result, err = c.sitemapParser.ParseSingleSitemap(ctx, c.config.SitemapURL)
+	} else {
+		// Auto-discover sitemaps
+		result, err = c.sitemapParser.DiscoverAndParse(ctx, baseURL)
 	}
-	c.visitedMux.RUnlock()
 
-	// Check limits
-	c.visitedMux.Lock()
-	if len(c.visited) >= c.config.MaxPages {
-		c.visitedMux.Unlock()
-		return
-	}
-	c.visited[pageURL] = true
-	c.visitedMux.Unlock()
-
-	// Check depth
-	if depth > c.config.MaxDepth {
-		return
-	}
-
-	c.sendLog("info", fmt.Sprintf("در حال خزش [عمق %d]: %s", depth, pageURL))
-	c.sendProgress(pageURL)
-
-	startTime := time.Now()
-	result := models.CrawlResult{URL: pageURL}
-
-	// Fetch and render the page
-	htmlContent, err := c.fetchPage(pageURL)
 	if err != nil {
-		result.Error = err
-		result.ErrorMsg = err.Error()
-		c.sendLog("error", "خطا در دریافت: "+pageURL+" - "+err.Error())
-		c.addResult(result)
-		c.sendStats()
-		return
+		return fmt.Errorf("sitemap parsing failed: %w", err)
 	}
 
-	result.ElapsedTime = time.Since(startTime)
-	result.StatusCode = 200
-	c.sendLog("success", fmt.Sprintf("دریافت شد (%s): %s", result.ElapsedTime.Round(time.Millisecond), pageURL))
+	if result.TotalURLs == 0 {
+		c.log("warn", "⚠️ No URLs found in sitemaps")
+		return nil
+	}
+
+	// Apply filters
+	urls := result.URLs
+	
+	if c.config.MinPriority > 0 {
+		urls = sitemap.FilterByPriority(urls, c.config.MinPriority)
+		c.log("info", fmt.Sprintf("🔍 Filtered by priority (≥%.1f): %d URLs", c.config.MinPriority, len(urls)))
+	}
+
+	if c.config.URLPattern != "" {
+		urls = sitemap.FilterByPattern(urls, c.config.URLPattern)
+		c.log("info", fmt.Sprintf("🔍 Filtered by pattern: %d URLs", len(urls)))
+	}
+
+	c.sitemapURLs = urls
+	
+	c.statsMu.Lock()
+	c.stats.SitemapURLs = len(urls)
+	c.stats.TotalURLs = min(len(urls), c.config.MaxPages)
+	c.statsMu.Unlock()
+
+	c.log("success", fmt.Sprintf("📊 Sitemap Summary: %d sitemaps, %d total URLs, %d to process",
+		result.SitemapsFound, len(urls), c.stats.TotalURLs))
+
+	// Queue sitemap URLs for crawling
+	for i, smURL := range urls {
+		if i >= c.config.MaxPages {
+			break
+		}
+		c.queue = append(c.queue, QueueItem{
+			URL:    smURL.Loc,
+			Depth:  0,
+			Source: "sitemap",
+		})
+	}
+
+	// Process the queue
+	return c.processQueue(ctx)
+}
+
+// startRecursiveMode handles traditional recursive crawling
+func (c *Crawler) startRecursiveMode(ctx context.Context, startURL string) error {
+	c.queue = append(c.queue, QueueItem{
+		URL:    startURL,
+		Depth:  0,
+		Source: "crawl",
+	})
+
+	c.statsMu.Lock()
+	c.stats.TotalURLs = 1
+	c.statsMu.Unlock()
+
+	return c.processQueue(ctx)
+}
+
+// processQueue processes the URL queue
+func (c *Crawler) processQueue(ctx context.Context) error {
+	for {
+		select {
+		case <-ctx.Done():
+			c.log("warn", "🛑 Crawling cancelled")
+			return ctx.Err()
+		default:
+		}
+
+		// Get next item from queue
+		c.queueMu.Lock()
+		if len(c.queue) == 0 {
+			c.queueMu.Unlock()
+			break
+		}
+		item := c.queue[0]
+		c.queue = c.queue[1:]
+		c.queueMu.Unlock()
+
+		// Check if already visited
+		c.visitedMu.RLock()
+		if c.visited[item.URL] {
+			c.visitedMu.RUnlock()
+			continue
+		}
+		c.visitedMu.RUnlock()
+
+		// Check page limit
+		c.statsMu.RLock()
+		processed := c.stats.ProcessedURLs
+		c.statsMu.RUnlock()
+
+		if processed >= c.config.MaxPages {
+			c.log("info", fmt.Sprintf("📄 Reached page limit (%d)", c.config.MaxPages))
+			break
+		}
+
+		// Mark as visited
+		c.visitedMu.Lock()
+		c.visited[item.URL] = true
+		c.visitedMu.Unlock()
+
+		// Update current URL in stats
+		c.statsMu.Lock()
+		c.stats.CurrentURL = item.URL
+		c.statsMu.Unlock()
+		c.updateStats()
+
+		// Crawl the page
+		c.log("info", fmt.Sprintf("🔗 [%d/%d] Crawling: %s", processed+1, c.config.MaxPages, truncateString(item.URL, 60)))
+		
+		news, links, err := c.crawlPage(ctx, item.URL, item.Depth)
+		
+		c.statsMu.Lock()
+		c.stats.ProcessedURLs++
+		if err != nil {
+			c.stats.ErrorCount++
+			c.statsMu.Unlock()
+			c.log("error", fmt.Sprintf("❌ Error: %v", err))
+		} else {
+			c.stats.SuccessCount++
+			c.statsMu.Unlock()
+
+			// Emit news if found
+			if news != nil && c.onNews != nil {
+				c.onNews(*news)
+			}
+
+			// Add discovered links to queue (only in recursive mode)
+			if !c.config.SitemapMode && item.Depth < c.config.MaxDepth {
+				c.addLinksToQueue(links, item.Depth+1)
+			}
+		}
+
+		c.updateStats()
+
+		// Delay between requests
+		time.Sleep(c.config.Delay)
+	}
+
+	c.log("success", fmt.Sprintf("✅ Crawling complete! Processed %d pages", c.stats.ProcessedURLs))
+	return nil
+}
+
+// crawlPage fetches and parses a single page
+func (c *Crawler) crawlPage(ctx context.Context, pageURL string, depth int) (*models.News, []string, error) {
+	// Create browser context
+	allocCtx, cancel := chromedp.NewExecAllocator(ctx,
+		append(chromedp.DefaultExecAllocatorOptions[:],
+			chromedp.Flag("headless", true),
+			chromedp.Flag("disable-gpu", true),
+			chromedp.Flag("no-sandbox", true),
+			chromedp.UserAgent(c.config.UserAgent),
+		)...,
+	)
+	defer cancel()
+
+	browserCtx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	timeoutCtx, cancel := context.WithTimeout(browserCtx, c.config.Timeout)
+	defer cancel()
+
+	var htmlContent string
+	err := chromedp.Run(timeoutCtx,
+		chromedp.Navigate(pageURL),
+		chromedp.WaitReady("body"),
+		chromedp.OuterHTML("html", &htmlContent),
+	)
+
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load page: %w", err)
+	}
 
 	// Parse HTML
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
 	if err != nil {
-		result.Error = err
-		result.ErrorMsg = err.Error()
-		c.addResult(result)
-		return
+		return nil, nil, fmt.Errorf("failed to parse HTML: %w", err)
 	}
 
 	// Extract news content
-	news := c.extractNews(doc, pageURL)
-	if news != nil && (news.Title != "" || news.Content != "") {
-		result.News = news
-		c.server.Hub.SendMessage(models.WSMessage{
-			Type:    "news",
-			Payload: news,
-		})
-		c.sendLog("info", "📰 خبر استخراج شد: "+news.Title)
-	}
+	news := c.extractNews(doc, pageURL, depth)
 
 	// Extract links
-	links := c.extractLinks(doc, pageURL, depth)
-	result.Links = links
-
-	// Send discovered links to dashboard
-	for _, link := range links {
-		c.server.Hub.SendMessage(models.WSMessage{
-			Type:    "link",
-			Payload: link,
-		})
-	}
-
-	c.addResult(result)
-	c.sendStats()
-
-	// Recursively crawl discovered links
-	for _, link := range links {
-		c.visitedMux.RLock()
-		visitedCount := len(c.visited)
-		c.visitedMux.RUnlock()
-
-		if visitedCount >= c.config.MaxPages {
-			break
+	var links []string
+	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
+		if href, exists := s.Attr("href"); exists {
+			absURL := resolveURL(pageURL, href)
+			if absURL != "" && c.shouldFollow(pageURL, absURL) {
+				links = append(links, absURL)
+				if c.onLink != nil {
+					c.onLink(models.DiscoveredLink{
+						URL:    absURL,
+						Source: "crawl",
+						Depth:  depth + 1,
+					})
+				}
+			}
 		}
+	})
 
-		if depth < c.config.MaxDepth {
-			time.Sleep(500 * time.Millisecond) // Be polite
-			c.crawlPage(link.URL, depth+1)
-		}
-	}
-}
-
-// fetchPage fetches a page using chromedp
-func (c *Crawler) fetchPage(pageURL string) (string, error) {
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", true),
-		chromedp.Flag("disable-gpu", true),
-		chromedp.Flag("no-sandbox", true),
-		chromedp.Flag("disable-dev-shm-usage", true),
-	)
-
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer allocCancel()
-
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-
-	ctx, cancel = context.WithTimeout(ctx, c.config.Timeout)
-	defer cancel()
-
-	var htmlContent string
-
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(pageURL),
-		chromedp.WaitVisible("body", chromedp.ByQuery),
-		chromedp.Sleep(c.config.WaitTime),
-		chromedp.OuterHTML("html", &htmlContent),
-	)
-
-	return htmlContent, err
+	return news, links, nil
 }
 
 // extractNews extracts news content from a page
-func (c *Crawler) extractNews(doc *goquery.Document, pageURL string) *models.News {
+func (c *Crawler) extractNews(doc *goquery.Document, pageURL string, depth int) *models.News {
 	news := &models.News{
 		URL:       pageURL,
 		ScrapedAt: time.Now(),
+		Depth:     depth,
 	}
 
-	// Extract title
-	for _, sel := range c.config.Selectors.Title {
+	// Try various title selectors
+	titleSelectors := []string{
+		"h1.title", "h1.entry-title", "h1.post-title", "h1.article-title",
+		"article h1", ".content h1", "main h1", "h1",
+	}
+	for _, sel := range titleSelectors {
 		if title := strings.TrimSpace(doc.Find(sel).First().Text()); title != "" {
 			news.Title = title
 			break
 		}
 	}
-
-	// Extract content
-	var contentParts []string
-	for _, sel := range c.config.Selectors.Content {
-		doc.Find(sel).Each(func(i int, s *goquery.Selection) {
-			if text := strings.TrimSpace(s.Text()); text != "" {
-				contentParts = append(contentParts, text)
-			}
-		})
-		if len(contentParts) > 0 {
-			break
-		}
+	if news.Title == "" {
+		news.Title = doc.Find("title").Text()
 	}
-	news.Content = strings.Join(contentParts, "\n\n")
 
-	// Extract summary
-	for _, sel := range c.config.Selectors.Summary {
-		if strings.HasPrefix(sel, "meta") {
-			if content, exists := doc.Find(sel).Attr("content"); exists && content != "" {
-				news.Summary = content
-				break
-			}
-		} else if summary := strings.TrimSpace(doc.Find(sel).First().Text()); summary != "" {
-			news.Summary = summary
+	// Try various content selectors
+	contentSelectors := []string{
+		"article .content", "article .entry-content", ".post-content",
+		"article p", ".article-body", ".story-body", "main .content",
+	}
+	for _, sel := range contentSelectors {
+		if content := strings.TrimSpace(doc.Find(sel).Text()); len(content) > 100 {
+			news.Content = truncateString(content, 500)
 			break
 		}
 	}
 
 	// Extract author
-	for _, sel := range c.config.Selectors.Author {
+	authorSelectors := []string{
+		".author", ".byline", "[rel='author']", ".writer",
+	}
+	for _, sel := range authorSelectors {
 		if author := strings.TrimSpace(doc.Find(sel).First().Text()); author != "" {
 			news.Author = author
 			break
@@ -380,146 +462,124 @@ func (c *Crawler) extractNews(doc *goquery.Document, pageURL string) *models.New
 	}
 
 	// Extract date
-	for _, sel := range c.config.Selectors.Date {
-		elem := doc.Find(sel).First()
-		if datetime, exists := elem.Attr("datetime"); exists {
-			news.PublishedAt = datetime
-			break
+	doc.Find("time, .date, .publish-date, .post-date").Each(func(i int, s *goquery.Selection) {
+		if news.PublishDate == "" {
+			if datetime, exists := s.Attr("datetime"); exists {
+				news.PublishDate = datetime
+			} else {
+				news.PublishDate = strings.TrimSpace(s.Text())
+			}
 		}
-		if date := strings.TrimSpace(elem.Text()); date != "" {
-			news.PublishedAt = date
-			break
-		}
-	}
+	})
 
 	// Extract tags
-	for _, sel := range c.config.Selectors.Tags {
-		doc.Find(sel).Each(func(i int, s *goquery.Selection) {
-			if tag := strings.TrimSpace(s.Text()); tag != "" {
-				news.Tags = append(news.Tags, tag)
-			}
-		})
-		if len(news.Tags) > 0 {
-			break
+	doc.Find(".tags a, .tag, [rel='tag']").Each(func(i int, s *goquery.Selection) {
+		if tag := strings.TrimSpace(s.Text()); tag != "" && len(news.Tags) < 10 {
+			news.Tags = append(news.Tags, tag)
 		}
-	}
-
-	// Extract image
-	for _, sel := range c.config.Selectors.Image {
-		elem := doc.Find(sel).First()
-		if src, exists := elem.Attr("src"); exists {
-			news.ImageURL = c.resolveURL(src)
-			break
-		}
-	}
+	})
 
 	return news
 }
 
-// extractLinks extracts links from a page
-func (c *Crawler) extractLinks(doc *goquery.Document, pageURL string, currentDepth int) []models.Link {
-	var links []models.Link
-	seen := make(map[string]bool)
+// addLinksToQueue adds discovered links to the crawl queue
+func (c *Crawler) addLinksToQueue(links []string, depth int) {
+	c.queueMu.Lock()
+	defer c.queueMu.Unlock()
 
-	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
-		href, exists := s.Attr("href")
-		if !exists || href == "" {
-			return
-		}
+	for _, link := range links {
+		c.visitedMu.RLock()
+		visited := c.visited[link]
+		c.visitedMu.RUnlock()
 
-		absoluteURL := c.resolveURL(href)
-		if absoluteURL == "" || seen[absoluteURL] {
-			return
+		if !visited {
+			c.queue = append(c.queue, QueueItem{
+				URL:    link,
+				Depth:  depth,
+				Source: "crawl",
+			})
+			
+			c.statsMu.Lock()
+			c.stats.TotalURLs++
+			c.statsMu.Unlock()
 		}
-		seen[absoluteURL] = true
-
-		if !c.config.FollowExternal && !c.isSameDomain(absoluteURL) {
-			return
-		}
-		if !strings.HasPrefix(absoluteURL, "http") {
-			return
-		}
-		if c.shouldSkipURL(absoluteURL) {
-			return
-		}
-
-		linkText := strings.TrimSpace(s.Text())
-		if linkText == "" {
-			linkText = "[بدون عنوان]"
-		}
-
-		links = append(links, models.Link{
-			URL:   absoluteURL,
-			Text:  linkText,
-			Depth: currentDepth + 1,
-		})
-	})
-
-	return links
+	}
 }
 
-// resolveURL converts relative URLs to absolute
-func (c *Crawler) resolveURL(href string) string {
-	if c.baseURL == nil {
-		return href
-	}
-	parsedHref, err := url.Parse(href)
-	if err != nil {
-		return ""
-	}
-	return c.baseURL.ResolveReference(parsedHref).String()
-}
-
-// isSameDomain checks if a URL is from the same domain
-func (c *Crawler) isSameDomain(checkURL string) bool {
-	if c.baseURL == nil {
-		return true
-	}
-	parsed, err := url.Parse(checkURL)
+// shouldFollow determines if a URL should be followed
+func (c *Crawler) shouldFollow(baseURL, targetURL string) bool {
+	baseParsed, err := url.Parse(baseURL)
 	if err != nil {
 		return false
 	}
-	return parsed.Host == c.baseURL.Host
-}
 
-// shouldSkipURL checks if a URL should be skipped
-func (c *Crawler) shouldSkipURL(checkURL string) bool {
-	skipPatterns := []string{
-		"javascript:", "mailto:", "tel:", "#",
-		".pdf", ".jpg", ".jpeg", ".png", ".gif",
-		".mp4", ".mp3", ".zip", ".rar",
-		"/login", "/signup", "/register", "/cart", "/checkout",
+	targetParsed, err := url.Parse(targetURL)
+	if err != nil {
+		return false
 	}
-	lowerURL := strings.ToLower(checkURL)
-	for _, pattern := range skipPatterns {
-		if strings.Contains(lowerURL, pattern) {
-			return true
+
+	// Skip non-HTTP(S) URLs
+	if targetParsed.Scheme != "http" && targetParsed.Scheme != "https" {
+		return false
+	}
+
+	// Skip common non-content files
+	skipExtensions := []string{".jpg", ".jpeg", ".png", ".gif", ".svg", ".css", ".js", ".pdf", ".zip", ".mp4", ".mp3"}
+	for _, ext := range skipExtensions {
+		if strings.HasSuffix(strings.ToLower(targetParsed.Path), ext) {
+			return false
 		}
 	}
-	return false
-}
 
-// addResult safely adds a result
-func (c *Crawler) addResult(result models.CrawlResult) {
-	c.resultsMux.Lock()
-	defer c.resultsMux.Unlock()
-	c.results = append(c.results, result)
-}
-
-// GetStats returns crawling statistics
-func (c *Crawler) GetStats() (totalPages, totalNews, totalLinks, errors int) {
-	c.resultsMux.Lock()
-	defer c.resultsMux.Unlock()
-
-	totalPages = len(c.results)
-	for _, result := range c.results {
-		if result.News != nil && result.News.Title != "" {
-			totalNews++
-		}
-		totalLinks += len(result.Links)
-		if result.Error != nil {
-			errors++
-		}
+	// Check if external links should be followed
+	if !c.config.FollowExternal && baseParsed.Host != targetParsed.Host {
+		return false
 	}
-	return
+
+	return true
+}
+
+// Helper functions
+func resolveURL(base, href string) string {
+	baseParsed, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	hrefParsed, err := url.Parse(href)
+	if err != nil {
+		return ""
+	}
+	resolved := baseParsed.ResolveReference(hrefParsed)
+	return resolved.String()
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+	
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm %ds", h, m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

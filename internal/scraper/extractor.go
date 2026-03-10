@@ -1,7 +1,8 @@
 package scraper
 
 import (
-	"strconv"
+	"context"
+	"fmt"
 	"time"
 
 	"spiderly/internal/crawler"
@@ -9,95 +10,78 @@ import (
 	"spiderly/internal/web"
 )
 
-// ScraperConfig holds configuration for the scraper
-type ScraperConfig struct {
-	MaxDepth       int
-	MaxPages       int
-	Timeout        time.Duration
-	WaitTime       time.Duration
-	FollowExternal bool
-	WebPort        int
-}
-
-// DefaultConfig returns default scraper configuration
-func DefaultConfig() ScraperConfig {
-	return ScraperConfig{
-		MaxDepth:       2,
-		MaxPages:       10,
-		Timeout:        30 * time.Second,
-		WaitTime:       2 * time.Second,
-		FollowExternal: false,
-		WebPort:        8080,
-	}
-}
-
-// Scraper handles the overall scraping process
-type Scraper struct {
-	config  ScraperConfig
-	server  *web.Server
+type Extractor struct {
 	crawler *crawler.Crawler
+	server  *web.Server
+	config  crawler.Config
 }
 
-// NewScraper creates a new Scraper instance
-func NewScraper(config ScraperConfig) *Scraper {
-	server := web.NewServer(config.WebPort)
+func NewExtractor(config crawler.Config, port int) *Extractor {
 
-	crawlerConfig := crawler.Config{
-		MaxDepth:       config.MaxDepth,
-		MaxPages:       config.MaxPages,
-		Timeout:        config.Timeout,
-		WaitTime:       config.WaitTime,
-		FollowExternal: config.FollowExternal,
-		Selectors:      crawler.DefaultSelectors(),
-	}
+	server := web.NewServer(port)
+	c := crawler.NewCrawler(config)
 
-	return &Scraper{
-		config:  config,
+	ext := &Extractor{
+		crawler: c,
 		server:  server,
-		crawler: crawler.NewCrawler(crawlerConfig, server),
+		config:  config,
 	}
+
+	ext.bindCallbacks()
+
+	return ext
 }
 
-// Run starts the web server and scraping process
-func (s *Scraper) Run(startURL string) ([]models.CrawlResult, error) {
-	// Start the web server
-	s.server.Start()
+func (e *Extractor) bindCallbacks() {
 
-	// Print console info
-	printStartupInfo(s.config)
+	// NEWS
+	e.crawler.SetNewsCallback(func(news models.News) {
+		e.server.BroadcastNews(news)
+	})
 
-	// Start crawling (runs in foreground)
-	results, err := s.crawler.Crawl(startURL)
-	if err != nil {
-		return nil, err
-	}
+	// LOGS
+	e.crawler.SetLogCallback(func(level, msg string) {
 
-	return results, nil
+		e.server.BroadcastLog(level, msg)
+
+		// also print to console
+		fmt.Printf("[%s] %s\n", level, msg)
+	})
+
+	// STATS
+	e.crawler.SetStatsCallback(func(stats models.CrawlStats) {
+		e.server.BroadcastStats(stats)
+	})
+
+	// LINKS
+	e.crawler.SetLinkCallback(func(link models.DiscoveredLink) {
+		e.server.BroadcastLink(link)
+	})
+
+	// PROGRESS
+	e.crawler.SetProgressCallback(func(p float64) {
+		e.server.BroadcastProgress(p)
+	})
 }
 
-func printStartupInfo(config ScraperConfig) {
-	println()
-	println("  ╔══════════════════════════════════════════════════╗")
-	println("  ║           🕷️  SPIDERLY - Web Crawler             ║")
-	println("  ╠══════════════════════════════════════════════════╣")
-	println("  ║                                                  ║")
-	println("  ║  Dashboard: http://localhost:" + strconv.Itoa(config.WebPort) + padRight("", 18-len(strconv.Itoa(config.WebPort))) + "║")
-	println("  ║  Max Depth: " + strconv.Itoa(config.MaxDepth) + padRight("", 37-len(strconv.Itoa(config.MaxDepth))) + "║")
-	println("  ║  Max Pages: " + strconv.Itoa(config.MaxPages) + padRight("", 37-len(strconv.Itoa(config.MaxPages))) + "║")
-	println("  ║                                                  ║")
-	println("  ║  Open your browser to see the live dashboard!    ║")
-	println("  ║                                                  ║")
-	println("  ╚══════════════════════════════════════════════════╝")
-	println()
-}
+func (e *Extractor) Start(ctx context.Context, startURL string) error {
 
-func padRight(s string, n int) string {
-	if n <= 0 {
-		return s
-	}
-	result := s
-	for i := 0; i < n; i++ {
-		result += " "
-	}
-	return result
+	// Start dashboard
+	go func() {
+
+		fmt.Printf("\n🖥️  Dashboard running at:\n")
+		fmt.Printf("   http://localhost:%d\n\n", e.server.GetPort())
+
+		if err := e.server.Start(); err != nil {
+			fmt.Println("dashboard error:", err)
+		}
+
+	}()
+
+	// small delay so dashboard is ready
+	time.Sleep(1 * time.Second)
+
+	fmt.Println("🚀 Spiderly crawler starting...")
+
+	return e.crawler.Start(ctx, startURL)
 }

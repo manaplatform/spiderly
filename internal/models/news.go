@@ -1,65 +1,89 @@
 package models
 
-import "time"
+import (
+	"encoding/xml"
+	"time"
+)
 
-// News represents a single news article
+// News represents a scraped news article
 type News struct {
-	Title       string   `json:"title"`
-	Content     string   `json:"content"`
-	Summary     string   `json:"summary"`
-	URL         string   `json:"url"`
-	ImageURL    string   `json:"image_url"`
-	Author      string   `json:"author"`
-	PublishedAt string   `json:"published_at"`
+	URL         string    `json:"url"`
+	Title       string    `json:"title"`
+	Content     string    `json:"content"`
+	Author      string    `json:"author"`
+	PublishDate string    `json:"publish_date"`
+	Tags        []string  `json:"tags"`
 	ScrapedAt   time.Time `json:"scraped_at"`
-	Tags        []string `json:"tags"`
+	Depth       int       `json:"depth"`
 }
 
-// Link represents a discovered link on a page
-type Link struct {
-	URL   string `json:"url"`
-	Text  string `json:"text"`
-	Depth int    `json:"depth"`
+// CrawlStats holds crawling statistics
+type CrawlStats struct {
+	TotalURLs     int     `json:"total_urls"`
+	ProcessedURLs int     `json:"processed_urls"`
+	SuccessCount  int     `json:"success_count"`
+	ErrorCount    int     `json:"error_count"`
+	CurrentURL    string  `json:"current_url"`
+	ElapsedTime   string  `json:"elapsed_time"`
+	Progress      float64 `json:"progress"`
+	SitemapMode   bool    `json:"sitemap_mode"`
+	SitemapURLs   int     `json:"sitemap_urls"`
+	SitemapsFound int     `json:"sitemaps_found"`
 }
 
-// CrawlResult holds the result of crawling a page
-type CrawlResult struct {
-	URL         string        `json:"url"`
-	News        *News         `json:"news"`
-	Links       []Link        `json:"links"`
-	Error       error         `json:"-"`
-	ErrorMsg    string        `json:"error_msg,omitempty"`
-	StatusCode  int           `json:"status_code"`
-	ElapsedTime time.Duration `json:"elapsed_time"`
-}
-
-// WSMessage is a WebSocket message sent to the frontend
-type WSMessage struct {
+// WebSocketMessage represents a message sent to the dashboard
+type WebSocketMessage struct {
 	Type    string      `json:"type"`
 	Payload interface{} `json:"payload"`
 }
 
 // LogEntry represents a log message
 type LogEntry struct {
-	Level     string `json:"level"`
-	Message   string `json:"message"`
-	Timestamp string `json:"timestamp"`
+	Level     string    `json:"level"`
+	Message   string    `json:"message"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
-// StatsPayload holds crawling statistics
-type StatsPayload struct {
-	TotalPages  int    `json:"total_pages"`
-	TotalNews   int    `json:"total_news"`
-	TotalLinks  int    `json:"total_links"`
-	Errors      int    `json:"errors"`
-	ElapsedTime string `json:"elapsed_time"`
-	Status      string `json:"status"`
+// DiscoveredLink represents a discovered URL
+type DiscoveredLink struct {
+	URL      string `json:"url"`
+	Source   string `json:"source"`
+	Depth    int    `json:"depth"`
+	Priority string `json:"priority,omitempty"`
+	LastMod  string `json:"lastmod,omitempty"`
 }
 
-// ProgressPayload holds progress info
-type ProgressPayload struct {
-	CurrentURL string  `json:"current_url"`
-	Progress   float64 `json:"progress"`
-	PagesDone  int     `json:"pages_done"`
-	PagesTotal int     `json:"pages_total"`
+// SitemapURL represents a single URL entry in a sitemap
+type SitemapURL struct {
+	Loc        string  `xml:"loc" json:"loc"`
+	LastMod    string  `xml:"lastmod,omitempty" json:"lastmod,omitempty"`
+	ChangeFreq string  `xml:"changefreq,omitempty" json:"changefreq,omitempty"`
+	Priority   float64 `xml:"priority,omitempty" json:"priority,omitempty"`
+}
+
+// Sitemap represents a standard sitemap.xml structure
+type Sitemap struct {
+	XMLName xml.Name     `xml:"urlset"`
+	URLs    []SitemapURL `xml:"url"`
+}
+
+// SitemapIndex represents a sitemap index file
+type SitemapIndex struct {
+	XMLName  xml.Name       `xml:"sitemapindex"`
+	Sitemaps []SitemapEntry `xml:"sitemap"`
+}
+
+// SitemapEntry represents an entry in a sitemap index
+type SitemapEntry struct {
+	Loc     string `xml:"loc" json:"loc"`
+	LastMod string `xml:"lastmod,omitempty" json:"lastmod,omitempty"`
+}
+
+// SitemapResult holds the result of sitemap parsing
+type SitemapResult struct {
+	URLs          []SitemapURL `json:"urls"`
+	SitemapsFound int          `json:"sitemaps_found"`
+	TotalURLs     int          `json:"total_urls"`
+	Source        string       `json:"source"`
+	ParsedAt      time.Time    `json:"parsed_at"`
 }

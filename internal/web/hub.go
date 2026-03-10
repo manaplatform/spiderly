@@ -1,22 +1,28 @@
 package web
 
 import (
-	"encoding/json"
-	"log"
+	"net/http"
 	"sync"
-
-	"spiderly/internal/models"
 
 	"github.com/gorilla/websocket"
 )
 
-// Client represents a single WebSocket client
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+// Client represents a WebSocket client connection
 type Client struct {
+	hub  *Hub
 	conn *websocket.Conn
 	send chan []byte
 }
 
-// Hub manages all WebSocket clients
+// Hub maintains the set of active clients and broadcasts messages
 type Hub struct {
 	clients    map[*Client]bool
 	broadcast  chan []byte
@@ -25,7 +31,7 @@ type Hub struct {
 	mu         sync.RWMutex
 }
 
-// NewHub creates a new Hub
+// NewHub creates a new Hub instance
 func NewHub() *Hub {
 	return &Hub{
 		clients:    make(map[*Client]bool),
@@ -35,7 +41,7 @@ func NewHub() *Hub {
 	}
 }
 
-// Run starts the hub event loop
+// Run starts the hub's main loop
 func (h *Hub) Run() {
 	for {
 		select {
@@ -43,7 +49,6 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			h.clients[client] = true
 			h.mu.Unlock()
-			log.Printf("Client connected. Total: %d", len(h.clients))
 
 		case client := <-h.unregister:
 			h.mu.Lock()
@@ -52,7 +57,6 @@ func (h *Hub) Run() {
 				close(client.send)
 			}
 			h.mu.Unlock()
-			log.Printf("Client disconnected. Total: %d", len(h.clients))
 
 		case message := <-h.broadcast:
 			h.mu.RLock()
@@ -69,34 +73,34 @@ func (h *Hub) Run() {
 	}
 }
 
-// SendMessage sends a WSMessage to all connected clients
-func (h *Hub) SendMessage(msg models.WSMessage) {
-	data, err := json.Marshal(msg)
+// Broadcast sends a message to all connected clients
+func (h *Hub) Broadcast(message []byte) {
+	h.broadcast <- message
+}
+
+// HandleWebSocket handles new WebSocket connections
+func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("Error marshaling message: %v", err)
 		return
 	}
-	h.broadcast <- data
-}
 
-// WritePump pumps messages from the hub to the WebSocket connection
-func (c *Client) WritePump() {
-	defer func() {
-		c.conn.Close()
-	}()
-
-	for message := range c.send {
-		err := c.conn.WriteMessage(websocket.TextMessage, message)
-		if err != nil {
-			return
-		}
+	client := &Client{
+		hub:  h,
+		conn: conn,
+		send: make(chan []byte, 256),
 	}
+
+	h.register <- client
+
+	go client.writePump()
+	go client.readPump()
 }
 
-// ReadPump pumps messages from the WebSocket connection to the hub
-func (c *Client) ReadPump(hub *Hub) {
+// readPump pumps messages from the WebSocket connection to the hub
+func (c *Client) readPump() {
 	defer func() {
-		hub.unregister <- c
+		c.hub.unregister <- c
 		c.conn.Close()
 	}()
 
@@ -104,6 +108,40 @@ func (c *Client) ReadPump(hub *Hub) {
 		_, _, err := c.conn.ReadMessage()
 		if err != nil {
 			break
+		}
+	}
+}
+
+// writePump pumps messages from the hub to the WebSocket connection
+func (c *Client) writePump() {
+	defer func() {
+		c.conn.Close()
+	}()
+
+	for {
+		select {
+		case message, ok := <-c.send:
+			if !ok {
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+
+			w, err := c.conn.NextWriter(websocket.TextMessage)
+			if err != nil {
+				return
+			}
+			w.Write(message)
+
+			// Drain queued messages into current frame
+			n := len(c.send)
+			for i := 0; i < n; i++ {
+				w.Write([]byte{'\n'})
+				w.Write(<-c.send)
+			}
+
+			if err := w.Close(); err != nil {
+				return
+			}
 		}
 	}
 }
