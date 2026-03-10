@@ -3,441 +3,310 @@ package sitemap
 import (
 	"bufio"
 	"compress/gzip"
-	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"spiderly/internal/models"
 )
 
-// Parser handles sitemap discovery and parsing
-type Parser struct {
-	client      *http.Client
-	userAgent   string
-	maxSitemaps int
-	timeout     time.Duration
-	
-	// Callbacks
-	onLog       func(level, message string)
-	onURLFound  func(sitemapURL models.SitemapURL, source string)
-	onSitemapFound func(url string)
+// Common sitemap locations to check
+var commonSitemapPaths = []string{
+	"/sitemap.xml",
+	"/sitemap_index.xml",
+	"/sitemap-index.xml",
+	"/sitemaps.xml",
+	"/sitemap1.xml",
+	"/sitemap-0.xml",
+	"/post-sitemap.xml",
+	"/page-sitemap.xml",
+	"/news-sitemap.xml",
+	"/sitemap/sitemap.xml",
+	"/sitemaps/sitemap.xml",
 }
 
-// ParserConfig holds configuration for the sitemap parser
-type ParserConfig struct {
-	UserAgent   string
-	MaxSitemaps int
-	Timeout     time.Duration
+// Parser handles sitemap discovery and parsing
+type Parser struct {
+	client  *http.Client
+	timeout time.Duration
+	verbose bool
 }
 
 // NewParser creates a new sitemap parser
-func NewParser(config ParserConfig) *Parser {
-	if config.UserAgent == "" {
-		config.UserAgent = "Spiderly/1.0 (Sitemap Crawler)"
+func NewParser(timeout time.Duration, verbose bool) *Parser {
+	if timeout == 0 {
+		timeout = 30 * time.Second
 	}
-	if config.MaxSitemaps == 0 {
-		config.MaxSitemaps = 50
-	}
-	if config.Timeout == 0 {
-		config.Timeout = 30 * time.Second
-	}
-
+	
 	return &Parser{
 		client: &http.Client{
-			Timeout: config.Timeout,
+			Timeout: timeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 10 {
+				if len(via) >= 5 {
 					return fmt.Errorf("too many redirects")
 				}
 				return nil
 			},
 		},
-		userAgent:   config.UserAgent,
-		maxSitemaps: config.MaxSitemaps,
-		timeout:     config.Timeout,
+		timeout: timeout,
+		verbose: verbose,
 	}
 }
 
-// SetLogCallback sets the logging callback
-func (p *Parser) SetLogCallback(fn func(level, message string)) {
-	p.onLog = fn
-}
-
-// SetURLFoundCallback sets the URL discovery callback
-func (p *Parser) SetURLFoundCallback(fn func(sitemapURL models.SitemapURL, source string)) {
-	p.onURLFound = fn
-}
-
-// SetSitemapFoundCallback sets the sitemap discovery callback
-func (p *Parser) SetSitemapFoundCallback(fn func(url string)) {
-	p.onSitemapFound = fn
-}
-
-func (p *Parser) log(level, message string) {
-	if p.onLog != nil {
-		p.onLog(level, message)
-	}
-}
-
-// DiscoverAndParse discovers sitemaps and parses all URLs
-func (p *Parser) DiscoverAndParse(ctx context.Context, baseURL string) (*models.SitemapResult, error) {
-	parsedURL, err := url.Parse(baseURL)
+// DiscoverSitemaps finds all sitemaps for a given domain
+func (p *Parser) DiscoverSitemaps(baseURL string) ([]string, error) {
+	parsed, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid URL: %w", err)
+		return nil, err
 	}
-
-	result := &models.SitemapResult{
-		URLs:     make([]models.SitemapURL, 0),
-		ParsedAt: time.Now(),
-		Source:   baseURL,
-	}
-
-	// Track visited sitemaps to avoid duplicates
-	visited := make(map[string]bool)
-	var mu sync.Mutex
-
-	// Try to discover sitemaps
-	sitemapURLs := p.discoverSitemaps(ctx, parsedURL)
 	
-	if len(sitemapURLs) == 0 {
-		p.log("warn", "No sitemaps found for "+baseURL)
-		return result, nil
+	baseHost := fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
+	discovered := make(map[string]bool)
+	var sitemaps []string
+	
+	// 1. Check robots.txt first (highest priority)
+	robotsSitemaps := p.parseRobotsTxt(baseHost + "/robots.txt")
+	for _, sm := range robotsSitemaps {
+		if !discovered[sm] {
+			discovered[sm] = true
+			sitemaps = append(sitemaps, sm)
+			p.logVerbose("Found sitemap in robots.txt: %s", sm)
+		}
 	}
-
-	p.log("info", fmt.Sprintf("🗺️ Found %d potential sitemap location(s)", len(sitemapURLs)))
-
-	// Process each sitemap
-	for _, smURL := range sitemapURLs {
-		if ctx.Err() != nil {
-			break
-		}
-
-		mu.Lock()
-		if visited[smURL] {
-			mu.Unlock()
+	
+	// 2. Check common sitemap locations
+	for _, path := range commonSitemapPaths {
+		sitemapURL := baseHost + path
+		if discovered[sitemapURL] {
 			continue
 		}
-		visited[smURL] = true
-		mu.Unlock()
-
-		urls, nestedSitemaps, err := p.parseSitemap(ctx, smURL)
+		
+		if p.checkSitemapExists(sitemapURL) {
+			discovered[sitemapURL] = true
+			sitemaps = append(sitemaps, sitemapURL)
+			p.logVerbose("Found sitemap at common path: %s", sitemapURL)
+		}
+	}
+	
+	// 3. Expand sitemap indices
+	var expandedSitemaps []string
+	for _, sm := range sitemaps {
+		children, err := p.expandSitemapIndex(sm)
 		if err != nil {
-			p.log("warn", fmt.Sprintf("Failed to parse sitemap %s: %v", smURL, err))
+			p.logVerbose("Error expanding sitemap index %s: %v", sm, err)
+			// Still include the original sitemap
+			expandedSitemaps = append(expandedSitemaps, sm)
 			continue
 		}
-
-		result.SitemapsFound++
-		if p.onSitemapFound != nil {
-			p.onSitemapFound(smURL)
-		}
-
-		// Add discovered URLs
-		for _, u := range urls {
-			result.URLs = append(result.URLs, u)
-			if p.onURLFound != nil {
-				p.onURLFound(u, smURL)
-			}
-		}
-
-		p.log("success", fmt.Sprintf("✅ Parsed sitemap: %s (%d URLs)", truncateURL(smURL, 50), len(urls)))
-
-		// Process nested sitemaps (sitemap index)
-		for _, nestedURL := range nestedSitemaps {
-			if result.SitemapsFound >= p.maxSitemaps {
-				p.log("warn", fmt.Sprintf("Reached maximum sitemap limit (%d)", p.maxSitemaps))
-				break
-			}
-
-			mu.Lock()
-			if visited[nestedURL] {
-				mu.Unlock()
-				continue
-			}
-			visited[nestedURL] = true
-			mu.Unlock()
-
-			nestedURLs, _, err := p.parseSitemap(ctx, nestedURL)
-			if err != nil {
-				p.log("warn", fmt.Sprintf("Failed to parse nested sitemap %s: %v", nestedURL, err))
-				continue
-			}
-
-			result.SitemapsFound++
-			if p.onSitemapFound != nil {
-				p.onSitemapFound(nestedURL)
-			}
-
-			for _, u := range nestedURLs {
-				result.URLs = append(result.URLs, u)
-				if p.onURLFound != nil {
-					p.onURLFound(u, nestedURL)
+		
+		if len(children) > 0 {
+			for _, child := range children {
+				if !discovered[child] {
+					discovered[child] = true
+					expandedSitemaps = append(expandedSitemaps, child)
 				}
 			}
-
-			p.log("success", fmt.Sprintf("✅ Parsed nested sitemap: %s (%d URLs)", truncateURL(nestedURL, 50), len(nestedURLs)))
+		} else {
+			expandedSitemaps = append(expandedSitemaps, sm)
 		}
 	}
-
-	result.TotalURLs = len(result.URLs)
-	return result, nil
-}
-
-// discoverSitemaps finds sitemap URLs from common locations and robots.txt
-func (p *Parser) discoverSitemaps(ctx context.Context, baseURL *url.URL) []string {
-	var sitemaps []string
-	seen := make(map[string]bool)
-
-	addSitemap := func(u string) {
-		if !seen[u] {
-			seen[u] = true
-			sitemaps = append(sitemaps, u)
-		}
-	}
-
-	// Common sitemap locations
-	commonPaths := []string{
-		"/sitemap.xml",
-		"/sitemap_index.xml",
-		"/sitemap-index.xml",
-		"/sitemapindex.xml",
-		"/sitemap1.xml",
-		"/sitemap-news.xml",
-		"/news-sitemap.xml",
-		"/post-sitemap.xml",
-		"/page-sitemap.xml",
-		"/wp-sitemap.xml",
-	}
-
-	baseURLStr := fmt.Sprintf("%s://%s", baseURL.Scheme, baseURL.Host)
-
-	// Check robots.txt first
-	robotsURL := baseURLStr + "/robots.txt"
-	p.log("info", "🤖 Checking robots.txt for sitemap declarations...")
 	
-	robotsSitemaps := p.parseSitemapsFromRobots(ctx, robotsURL)
-	for _, sm := range robotsSitemaps {
-		addSitemap(sm)
-		p.log("info", fmt.Sprintf("📍 Found in robots.txt: %s", truncateURL(sm, 60)))
-	}
-
-	// Check common paths
-	p.log("info", "🔍 Checking common sitemap locations...")
-	for _, path := range commonPaths {
-		smURL := baseURLStr + path
-		if p.checkSitemapExists(ctx, smURL) {
-			addSitemap(smURL)
-			p.log("info", fmt.Sprintf("📍 Found: %s", path))
-		}
-	}
-
-	return sitemaps
+	return expandedSitemaps, nil
 }
 
-// parseSitemapsFromRobots extracts sitemap URLs from robots.txt
-func (p *Parser) parseSitemapsFromRobots(ctx context.Context, robotsURL string) []string {
+// parseRobotsTxt extracts sitemap URLs from robots.txt
+func (p *Parser) parseRobotsTxt(robotsURL string) []string {
 	var sitemaps []string
-
-	req, err := http.NewRequestWithContext(ctx, "GET", robotsURL, nil)
+	
+	resp, err := p.client.Get(robotsURL)
 	if err != nil {
-		return sitemaps
-	}
-	req.Header.Set("User-Agent", p.userAgent)
-
-	resp, err := p.client.Do(req)
-	if err != nil || resp.StatusCode != 200 {
+		p.logVerbose("Failed to fetch robots.txt: %v", err)
 		return sitemaps
 	}
 	defer resp.Body.Close()
-
+	
+	if resp.StatusCode != http.StatusOK {
+		p.logVerbose("robots.txt returned status %d", resp.StatusCode)
+		return sitemaps
+	}
+	
 	scanner := bufio.NewScanner(resp.Body)
-	sitemapRegex := regexp.MustCompile(`(?i)^sitemap:\s*(.+)$`)
-
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if matches := sitemapRegex.FindStringSubmatch(line); len(matches) > 1 {
-			smURL := strings.TrimSpace(matches[1])
-			if smURL != "" {
-				sitemaps = append(sitemaps, smURL)
+		
+		// Skip comments and empty lines
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		
+		// Look for Sitemap: directive (case-insensitive)
+		if strings.HasPrefix(strings.ToLower(line), "sitemap:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				sitemapURL := strings.TrimSpace(parts[1])
+				if sitemapURL != "" {
+					sitemaps = append(sitemaps, sitemapURL)
+				}
 			}
 		}
 	}
-
+	
 	return sitemaps
 }
 
 // checkSitemapExists verifies if a sitemap URL is accessible
-func (p *Parser) checkSitemapExists(ctx context.Context, sitemapURL string) bool {
-	req, err := http.NewRequestWithContext(ctx, "HEAD", sitemapURL, nil)
+func (p *Parser) checkSitemapExists(sitemapURL string) bool {
+	req, err := http.NewRequest(http.MethodHead, sitemapURL, nil)
 	if err != nil {
 		return false
 	}
-	req.Header.Set("User-Agent", p.userAgent)
-
+	
+	req.Header.Set("User-Agent", "Spiderly/1.0 (+https://github.com/spiderly)")
+	
 	resp, err := p.client.Do(req)
 	if err != nil {
+		// Try GET as fallback (some servers don't support HEAD)
+		resp, err = p.client.Get(sitemapURL)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+	} else {
+		defer resp.Body.Close()
+	}
+	
+	// Check for success status and XML content type
+	if resp.StatusCode != http.StatusOK {
 		return false
 	}
-	defer resp.Body.Close()
-
-	return resp.StatusCode == 200
+	
+	contentType := resp.Header.Get("Content-Type")
+	return strings.Contains(contentType, "xml") || 
+	       strings.Contains(contentType, "text/plain") ||
+	       strings.HasSuffix(sitemapURL, ".xml")
 }
 
-// parseSitemap parses a single sitemap XML file
-func (p *Parser) parseSitemap(ctx context.Context, sitemapURL string) ([]models.SitemapURL, []string, error) {
-	var urls []models.SitemapURL
-	var nestedSitemaps []string
-
-	req, err := http.NewRequestWithContext(ctx, "GET", sitemapURL, nil)
+// expandSitemapIndex checks if a sitemap is an index and returns child sitemaps
+func (p *Parser) expandSitemapIndex(sitemapURL string) ([]string, error) {
+	body, err := p.fetchSitemap(sitemapURL)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	req.Header.Set("User-Agent", p.userAgent)
-	req.Header.Set("Accept", "application/xml, text/xml, */*")
-	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	defer body.Close()
+	
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Try parsing as sitemap index
+	var index models.SitemapIndex
+	if err := xml.Unmarshal(data, &index); err == nil && len(index.Sitemaps) > 0 {
+		var children []string
+		for _, sm := range index.Sitemaps {
+			if sm.Loc != "" {
+				children = append(children, sm.Loc)
+			}
+		}
+		p.logVerbose("Expanded sitemap index %s: found %d child sitemaps", sitemapURL, len(children))
+		return children, nil
+	}
+	
+	// Not an index, return empty
+	return nil, nil
+}
 
+// ParseSitemap parses a sitemap and returns all URL entries
+func (p *Parser) ParseSitemap(sitemapURL string) ([]models.SitemapEntry, error) {
+	body, err := p.fetchSitemap(sitemapURL)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read sitemap body: %w", err)
+	}
+	
+	// Try parsing as URL set
+	var urlset models.Sitemap
+	if err := xml.Unmarshal(data, &urlset); err != nil {
+		return nil, fmt.Errorf("failed to parse sitemap XML: %w", err)
+	}
+	
+	entries := make([]models.SitemapEntry, 0, len(urlset.URLs))
+	for _, u := range urlset.URLs {
+		if u.Loc == "" {
+			continue
+		}
+		
+		entry := models.SitemapEntry{
+			URL:        u.Loc,
+			LastMod:    u.LastMod,
+			ChangeFreq: u.ChangeFreq,
+			Priority:   u.Priority,
+		}
+		entries = append(entries, entry)
+	}
+	
+	p.logVerbose("Parsed sitemap %s: %d URLs", sitemapURL, len(entries))
+	return entries, nil
+}
+
+// fetchSitemap retrieves a sitemap with gzip support
+func (p *Parser) fetchSitemap(sitemapURL string) (io.ReadCloser, error) {
+	req, err := http.NewRequest(http.MethodGet, sitemapURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	
+	req.Header.Set("User-Agent", "Spiderly/1.0 (+https://github.com/spiderly)")
+	req.Header.Set("Accept", "application/xml, text/xml, */*")
+	req.Header.Set("Accept-Encoding", "gzip")
+	
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, fmt.Errorf("failed to fetch sitemap: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return nil, nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("sitemap returned status %d", resp.StatusCode)
 	}
-
-	var reader io.Reader = resp.Body
-
-	// Handle gzip-compressed sitemaps
-	if strings.Contains(resp.Header.Get("Content-Encoding"), "gzip") || 
-	   strings.HasSuffix(sitemapURL, ".gz") {
+	
+	// Handle gzip compression
+	var reader io.ReadCloser = resp.Body
+	if resp.Header.Get("Content-Encoding") == "gzip" || strings.HasSuffix(sitemapURL, ".gz") {
 		gzReader, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to decompress gzip: %w", err)
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 		}
-		defer gzReader.Close()
-		reader = gzReader
+		reader = &gzipReadCloser{gzReader, resp.Body}
 	}
-
-	// Read the body
-	body, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read body: %w", err)
-	}
-
-	// Try parsing as sitemap index first
-	var sitemapIndex models.SitemapIndex
-	if err := xml.Unmarshal(body, &sitemapIndex); err == nil && len(sitemapIndex.Sitemaps) > 0 {
-		p.log("info", fmt.Sprintf("📂 Found sitemap index with %d sitemaps", len(sitemapIndex.Sitemaps)))
-		for _, entry := range sitemapIndex.Sitemaps {
-			nestedSitemaps = append(nestedSitemaps, entry.Loc)
-		}
-		return urls, nestedSitemaps, nil
-	}
-
-	// Try parsing as regular sitemap
-	var sitemap models.Sitemap
-	if err := xml.Unmarshal(body, &sitemap); err == nil {
-		for _, u := range sitemap.URLs {
-			if u.Loc != "" {
-				urls = append(urls, u)
-			}
-		}
-		return urls, nestedSitemaps, nil
-	}
-
-	return nil, nil, fmt.Errorf("failed to parse XML structure")
+	
+	return reader, nil
 }
 
-// ParseSingleSitemap parses a specific sitemap URL directly
-func (p *Parser) ParseSingleSitemap(ctx context.Context, sitemapURL string) (*models.SitemapResult, error) {
-	result := &models.SitemapResult{
-		URLs:     make([]models.SitemapURL, 0),
-		ParsedAt: time.Now(),
-		Source:   sitemapURL,
-	}
-
-	visited := make(map[string]bool)
-	toProcess := []string{sitemapURL}
-
-	for len(toProcess) > 0 && result.SitemapsFound < p.maxSitemaps {
-		if ctx.Err() != nil {
-			break
-		}
-
-		currentURL := toProcess[0]
-		toProcess = toProcess[1:]
-
-		if visited[currentURL] {
-			continue
-		}
-		visited[currentURL] = true
-
-		urls, nestedSitemaps, err := p.parseSitemap(ctx, currentURL)
-		if err != nil {
-			p.log("warn", fmt.Sprintf("Failed to parse %s: %v", currentURL, err))
-			continue
-		}
-
-		result.SitemapsFound++
-		if p.onSitemapFound != nil {
-			p.onSitemapFound(currentURL)
-		}
-
-		for _, u := range urls {
-			result.URLs = append(result.URLs, u)
-			if p.onURLFound != nil {
-				p.onURLFound(u, currentURL)
-			}
-		}
-
-		toProcess = append(toProcess, nestedSitemaps...)
-		p.log("success", fmt.Sprintf("✅ Parsed: %s (%d URLs, %d nested)", truncateURL(currentURL, 40), len(urls), len(nestedSitemaps)))
-	}
-
-	result.TotalURLs = len(result.URLs)
-	return result, nil
+// gzipReadCloser wraps a gzip reader to close both readers
+type gzipReadCloser struct {
+	*gzip.Reader
+	underlying io.ReadCloser
 }
 
-// FilterURLs filters sitemap URLs based on criteria
-func FilterURLs(urls []models.SitemapURL, filter func(models.SitemapURL) bool) []models.SitemapURL {
-	var filtered []models.SitemapURL
-	for _, u := range urls {
-		if filter(u) {
-			filtered = append(filtered, u)
-		}
-	}
-	return filtered
+func (g *gzipReadCloser) Close() error {
+	g.Reader.Close()
+	return g.underlying.Close()
 }
 
-// FilterByPriority returns URLs with priority >= minPriority
-func FilterByPriority(urls []models.SitemapURL, minPriority float64) []models.SitemapURL {
-	return FilterURLs(urls, func(u models.SitemapURL) bool {
-		return u.Priority >= minPriority
-	})
-}
-
-// FilterByPattern returns URLs matching the regex pattern
-func FilterByPattern(urls []models.SitemapURL, pattern string) []models.SitemapURL {
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return urls
+func (p *Parser) logVerbose(format string, args ...interface{}) {
+	if p.verbose {
+		log.Printf("[SITEMAP] "+format, args...)
 	}
-	return FilterURLs(urls, func(u models.SitemapURL) bool {
-		return re.MatchString(u.Loc)
-	})
-}
-
-// Helper function to truncate long URLs for display
-func truncateURL(u string, maxLen int) string {
-	if len(u) <= maxLen {
-		return u
-	}
-	return u[:maxLen-3] + "..."
 }

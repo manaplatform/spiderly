@@ -1,128 +1,448 @@
 package main
 
 import (
-	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
+	"math"
 	"os"
-	"os/signal"
-	"syscall"
+	"sort"
+	"strings"
 	"time"
 
-	"spiderly/internal/crawler"
-	"spiderly/internal/scraper"
+	"spiderly/internal/core"
 )
 
-
 func main() {
-	// Parse command-line flags
-	startURL := flag.String("url", "", "Starting URL to crawl (required)")
-	maxDepth := flag.Int("depth", 2, "Maximum crawl depth")
-	maxPages := flag.Int("pages", 10, "Maximum number of pages to crawl")
-	timeout := flag.Int("timeout", 30, "Request timeout in seconds")
-	followExternal := flag.Bool("external", false, "Follow external links")
-	delay := flag.Int("delay", 500, "Delay between requests in milliseconds")
-	port := flag.Int("port", 8080, "Dashboard web server port")
-	
-	// Sitemap mode flags
-	sitemapMode := flag.Bool("sitemap", false, "Enable sitemap mode (discover and parse sitemaps)")
-	sitemapURL := flag.String("sitemap-url", "", "Direct sitemap URL to parse (implies -sitemap)")
-	minPriority := flag.Float64("min-priority", 0, "Minimum sitemap URL priority (0-1)")
-	urlPattern := flag.String("url-pattern", "", "Regex pattern to filter sitemap URLs")
-
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, `
-╔═══════════════════════════════════════════════════════════════╗
-║                     🕷️  SPIDERLY v1.0                         ║
-║              Advanced Web Crawler with Dashboard              ║
-╚═══════════════════════════════════════════════════════════════╝
-
-Usage: spiderly [options]
-
-BASIC OPTIONS:
-  -url string        Starting URL to crawl (required)
-  -depth int         Maximum crawl depth (default: 2)
-  -pages int         Maximum pages to crawl (default: 10)
-  -timeout int       Request timeout in seconds (default: 30)
-  -delay int         Delay between requests in ms (default: 500)
-  -external          Follow external links (default: false)
-  -port int          Dashboard port (default: 8080)
-
-SITEMAP MODE OPTIONS:
-  -sitemap           Enable sitemap discovery mode
-  -sitemap-url       Parse a specific sitemap URL directly
-  -min-priority      Filter URLs by minimum priority (0.0-1.0)
-  -url-pattern       Regex pattern to filter URLs
-
-EXAMPLES:
-  # Recursive crawl mode
-  spiderly -url "https://example.com" -depth 2 -pages 20
-
-  # Sitemap discovery mode
-  spiderly -url "https://example.com" -sitemap -pages 50
-
-  # Direct sitemap parsing
-  spiderly -sitemap-url "https://example.com/sitemap.xml" -pages 100
-
-  # Filtered sitemap crawl (news articles with high priority)
-  spiderly -url "https://example.com" -sitemap -min-priority 0.8 -url-pattern "/news/"
-
-`)
-		flag.PrintDefaults()
-	}
-
+	targetURL := flag.String("url", "", "Target URL to crawl")
+	maxPages := flag.Int("pages", 100, "Maximum number of pages to scrape")
+	outputFile := flag.String("output", "", "Path for JSON output file")
+	markdownFile := flag.String("markdown", "", "Path for Markdown output file")
 	flag.Parse()
 
-	// Validate required flags
-	if *startURL == "" && *sitemapURL == "" {
-		fmt.Println("❌ Error: -url or -sitemap-url is required")
-		flag.Usage()
+	if *targetURL == "" {
+		fmt.Println("Usage: spiderly -url <target> [options]")
+		fmt.Println()
+		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
-	// If sitemap-url is provided, enable sitemap mode
-	if *sitemapURL != "" {
-		*sitemapMode = true
+	target := *targetURL
+
+	e := core.New(target, *maxPages)
+
+	results, err := e.Run()
+	if err != nil {
+		log.Fatalf("❌ Crawl failed: %v", err)
 	}
 
-	// Use sitemap-url as start URL if url not provided
-	effectiveURL := *startURL
-	if effectiveURL == "" && *sitemapURL != "" {
-		effectiveURL = *sitemapURL
+	// Convert internal models to exported ScrapedPageResult
+	exported := core.ToScrapedPageResults(results)
+
+	if *outputFile != "" {
+		if err := saveJSON(exported, *outputFile); err != nil {
+			log.Printf("⚠️  Failed to save JSON: %v", err)
+		} else {
+			log.Printf("✅ JSON saved to %s", *outputFile)
+		}
 	}
 
-	// Create crawler configuration
-	config := crawler.Config{
-		MaxDepth:       *maxDepth,
-		MaxPages:       *maxPages,
-		Timeout:        time.Duration(*timeout) * time.Second,
-		FollowExternal: *followExternal,
-		Delay:          time.Duration(*delay) * time.Millisecond,
-		SitemapMode:    *sitemapMode,
-		SitemapURL:     *sitemapURL,
-		MinPriority:    *minPriority,
-		URLPattern:     *urlPattern,
+	if *markdownFile != "" {
+		if err := saveMarkdown(exported, *markdownFile, target); err != nil {
+			log.Printf("⚠️  Failed to save Markdown: %v", err)
+		} else {
+			log.Printf("✅ Markdown saved to %s", *markdownFile)
+		}
 	}
 
-	// Create scraper orchestrator
-	ext := scraper.NewExtractor(config, *port)
+	printSummary(exported)
+}
 
-	// Setup graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// ─────────────────────────────────────────────
+//  JSON Export
+// ─────────────────────────────────────────────
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		fmt.Println("\n🛑 Shutting down gracefully...")
-		cancel()
-	}()
-
-	// Start the extractor
-	if err := ext.Start(ctx, effectiveURL); err != nil {
-		fmt.Printf("❌ Error: %v\n", err)
-		os.Exit(1)
+func saveJSON(pages []core.ScrapedPageResult, path string) error {
+	data, err := json.MarshalIndent(pages, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal JSON: %w", err)
 	}
+	return writeFile(path, data)
+}
+
+// ─────────────────────────────────────────────
+//  Markdown Export
+// ─────────────────────────────────────────────
+
+func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error {
+	var sb strings.Builder
+
+	now := time.Now().Format("2006-01-02 15:04:05")
+
+	// ── Header ──────────────────────────────
+	sb.WriteString("# 🕷️ Spiderly Crawl Report\n\n")
+	sb.WriteString("| Field | Value |\n|---|---|\n")
+	sb.WriteString(fmt.Sprintf("| **Source URL** | `%s` |\n", sourceURL))
+	sb.WriteString(fmt.Sprintf("| **Generated** | %s |\n", now))
+	sb.WriteString(fmt.Sprintf("| **Total Pages** | %d |\n", len(pages)))
+	sb.WriteString("\n---\n\n")
+
+	// ── Statistics ──────────────────────────
+	sb.WriteString("## 📊 Statistics\n\n")
+
+	uniqueAuthors := map[string]bool{}
+	tagFreq := map[string]int{}
+	var totalSize int64
+	var totalLoad int64
+	statusCounts := map[int]int{}
+	var maxDepth int
+
+	for _, p := range pages {
+		if p.Author != "" {
+			uniqueAuthors[p.Author] = true
+		}
+		if p.Keywords != "" {
+			for _, kw := range strings.Split(p.Keywords, ",") {
+				kw = strings.TrimSpace(kw)
+				if kw != "" {
+					tagFreq[kw]++
+				}
+			}
+		}
+		totalSize += p.ContentLength
+		totalLoad += p.LoadTimeMs
+		statusCounts[p.StatusCode]++
+		if p.Depth > maxDepth {
+			maxDepth = p.Depth
+		}
+	}
+
+	sb.WriteString("| Metric | Value |\n|---|---|\n")
+	sb.WriteString(fmt.Sprintf("| Total pages scraped | **%d** |\n", len(pages)))
+	sb.WriteString(fmt.Sprintf("| Unique authors | **%d** |\n", len(uniqueAuthors)))
+	sb.WriteString(fmt.Sprintf("| Unique keywords | **%d** |\n", len(tagFreq)))
+	sb.WriteString(fmt.Sprintf("| Max crawl depth | **%d** |\n", maxDepth))
+	sb.WriteString(fmt.Sprintf("| Total content size | **%s** |\n", humanizeBytes(totalSize)))
+	if len(pages) > 0 {
+		sb.WriteString(fmt.Sprintf("| Avg load time | **%d ms** |\n", totalLoad/int64(len(pages))))
+	}
+	sb.WriteString("\n")
+
+	// ── Status Code Distribution ────────────
+	if len(statusCounts) > 0 {
+		sb.WriteString("### HTTP Status Codes\n\n")
+		sb.WriteString("| Status | Count | Bar |\n|---|---|---|\n")
+		statusKeys := sortedIntKeys(statusCounts)
+		for _, code := range statusKeys {
+			count := statusCounts[code]
+			bar := strings.Repeat("█", int(math.Ceil(float64(count)*30/float64(len(pages)))))
+			emoji := statusEmoji(code)
+			sb.WriteString(fmt.Sprintf("| %s %d | %d | %s |\n", emoji, code, count, bar))
+		}
+		sb.WriteString("\n")
+	}
+
+	// ── Top Keywords ────────────────────────
+	if len(tagFreq) > 0 {
+		sb.WriteString("### 🏷️ Top Keywords\n\n")
+		topTags := sortMapByValue(tagFreq, 15)
+		maxCount := topTags[0].count
+		for _, t := range topTags {
+			barLen := int(math.Ceil(float64(t.count) * 25 / float64(maxCount)))
+			bar := strings.Repeat("▓", barLen)
+			sb.WriteString(fmt.Sprintf("- **%s** (%d) %s\n", t.key, t.count, bar))
+		}
+		sb.WriteString("\n")
+	}
+
+	// ── Table of Contents ───────────────────
+	sb.WriteString("---\n\n")
+	sb.WriteString("## 📑 Table of Contents\n\n")
+	for i, p := range pages {
+		title := pageTitle(p)
+		anchor := fmt.Sprintf("page-%d", i+1)
+		sb.WriteString(fmt.Sprintf("%d. [%s](#%s)\n", i+1, escapeMDTableCell(title), anchor))
+	}
+	sb.WriteString("\n---\n\n")
+
+	// ── Individual Pages ────────────────────
+	sb.WriteString("## 📄 Pages Detail\n\n")
+
+	for i, p := range pages {
+		anchor := fmt.Sprintf("page-%d", i+1)
+		title := pageTitle(p)
+
+		sb.WriteString(fmt.Sprintf("<a id=\"%s\"></a>\n\n", anchor))
+		sb.WriteString(fmt.Sprintf("### %d. %s %s\n\n", i+1, statusEmoji(p.StatusCode), escapeMDTableCell(title)))
+
+		// Metadata table
+		sb.WriteString("| Field | Value |\n|---|---|\n")
+		sb.WriteString(fmt.Sprintf("| 🔗 URL | `%s` |\n", p.URL))
+		sb.WriteString(fmt.Sprintf("| 📶 Status | %d |\n", p.StatusCode))
+		sb.WriteString(fmt.Sprintf("| 📐 Depth | %d |\n", p.Depth))
+
+		if p.ContentType != "" {
+			sb.WriteString(fmt.Sprintf("| 📦 Content-Type | `%s` |\n", escapeMDTableCell(p.ContentType)))
+		}
+		if p.ContentLength > 0 {
+			sb.WriteString(fmt.Sprintf("| 📏 Size | %s |\n", humanizeBytes(p.ContentLength)))
+		}
+		if p.LoadTimeMs > 0 {
+			sb.WriteString(fmt.Sprintf("| ⏱️ Load Time | %d ms |\n", p.LoadTimeMs))
+		}
+		if p.Author != "" {
+			sb.WriteString(fmt.Sprintf("| ✍️ Author | %s |\n", escapeMDTableCell(p.Author)))
+		}
+		if p.PublishedDate != "" {
+			sb.WriteString(fmt.Sprintf("| 📅 Published | %s |\n", escapeMDTableCell(p.PublishedDate)))
+		}
+		if p.LinksCount > 0 {
+			sb.WriteString(fmt.Sprintf("| 🔗 Links | %d |\n", p.LinksCount))
+		}
+		if p.ImagesCount > 0 {
+			sb.WriteString(fmt.Sprintf("| 🖼️ Images | %d |\n", p.ImagesCount))
+		}
+		if !p.ScrapedAt.IsZero() {
+			sb.WriteString(fmt.Sprintf("| 🕐 Scraped | %s |\n", p.ScrapedAt.Format("2006-01-02 15:04:05")))
+		}
+		sb.WriteString("\n")
+
+		// H1
+		if p.H1 != "" && p.H1 != p.Title {
+			sb.WriteString(fmt.Sprintf("**H1:** %s\n\n", escapeMDTableCell(p.H1)))
+		}
+
+		// Description
+		if p.Description != "" {
+			sb.WriteString(fmt.Sprintf("> %s\n\n", escapeMDTableCell(p.Description)))
+		}
+
+		// Keywords
+		if p.Keywords != "" {
+			keywords := strings.Split(p.Keywords, ",")
+			var badges []string
+			for _, kw := range keywords {
+				kw = strings.TrimSpace(kw)
+				if kw != "" {
+					badges = append(badges, fmt.Sprintf("`%s`", kw))
+				}
+			}
+			if len(badges) > 0 {
+				sb.WriteString(fmt.Sprintf("**Keywords:** %s\n\n", strings.Join(badges, " ")))
+			}
+		}
+
+		// OG Image
+		if p.OGImage != "" {
+			sb.WriteString(fmt.Sprintf("**Featured Image:** ![og](%s)\n\n", p.OGImage))
+		}
+
+		// Body text preview
+		if p.BodyText != "" {
+			preview := truncate(p.BodyText, 1000)
+			paragraphs := splitParagraphs(preview, 3)
+			sb.WriteString("**Content Preview:**\n\n")
+			for _, para := range paragraphs {
+				sb.WriteString(fmt.Sprintf("%s\n\n", escapeMDTableCell(para)))
+			}
+		}
+
+		sb.WriteString("[⬆ Back to top](#-spiderly-crawl-report)\n\n")
+		sb.WriteString("---\n\n")
+	}
+
+	// ── Footer ──────────────────────────────
+	sb.WriteString(fmt.Sprintf("*Generated by Spiderly on %s*\n", now))
+
+	return writeFile(path, []byte(sb.String()))
+}
+
+// ─────────────────────────────────────────────
+//  Console Summary
+// ─────────────────────────────────────────────
+
+func printSummary(pages []core.ScrapedPageResult) {
+	fmt.Println()
+	fmt.Println("╔══════════════════════════════════════════════════════════╗")
+	fmt.Println("║               🕷️  Spiderly — Crawl Summary              ║")
+	fmt.Println("╠══════════════════════════════════════════════════════════╣")
+	fmt.Printf("║  Total pages scraped: %-34d ║\n", len(pages))
+	fmt.Println("╠══════════════════════════════════════════════════════════╣")
+
+	statusCounts := map[int]int{}
+	var totalSize int64
+	var totalLoad int64
+
+	for _, p := range pages {
+		statusCounts[p.StatusCode]++
+		totalSize += p.ContentLength
+		totalLoad += p.LoadTimeMs
+	}
+
+	// Status summary
+	statusKeys := sortedIntKeys(statusCounts)
+	for _, code := range statusKeys {
+		emoji := statusEmoji(code)
+		fmt.Printf("║  %s HTTP %d: %-38d ║\n", emoji, code, statusCounts[code])
+	}
+
+	if len(pages) > 0 {
+		avgLoad := totalLoad / int64(len(pages))
+		fmt.Printf("║  📏 Total size: %-40s ║\n", humanizeBytes(totalSize))
+		fmt.Printf("║  ⏱️  Avg load time: %-36s ║\n", fmt.Sprintf("%d ms", avgLoad))
+	}
+
+	fmt.Println("╠══════════════════════════════════════════════════════════╣")
+
+	// Show first 20 pages
+	limit := 20
+	if len(pages) < limit {
+		limit = len(pages)
+	}
+
+	for i := 0; i < limit; i++ {
+		p := pages[i]
+		title := pageTitle(p)
+		if len(title) > 42 {
+			title = title[:39] + "..."
+		}
+		status := fmt.Sprintf("[%d]", p.StatusCode)
+		fmt.Printf("║  %-6s %-49s ║\n", status, title)
+
+		if p.Author != "" || p.PublishedDate != "" {
+			meta := ""
+			if p.Author != "" {
+				meta += "✍️ " + p.Author
+			}
+			if p.PublishedDate != "" {
+				if meta != "" {
+					meta += "  |  "
+				}
+				meta += "📅 " + p.PublishedDate
+			}
+			if len(meta) > 53 {
+				meta = meta[:50] + "..."
+			}
+			fmt.Printf("║         %-48s ║\n", meta)
+		}
+	}
+
+	if len(pages) > limit {
+		fmt.Printf("║  ... and %d more pages %-33s ║\n", len(pages)-limit, "")
+	}
+
+	fmt.Println("╚══════════════════════════════════════════════════════════╝")
+	fmt.Println()
+}
+
+// ─────────────────────────────────────────────
+//  Helpers
+// ─────────────────────────────────────────────
+
+func pageTitle(p core.ScrapedPageResult) string {
+	if p.Title != "" {
+		return p.Title
+	}
+	if p.H1 != "" {
+		return p.H1
+	}
+	if p.Description != "" {
+		return truncate(p.Description, 60)
+	}
+	return p.URL
+}
+
+func truncate(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+func escapeMDTableCell(s string) string {
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", "")
+	return strings.TrimSpace(s)
+}
+
+func splitParagraphs(text string, max int) []string {
+	raw := strings.Split(text, "\n")
+	var out []string
+	for _, line := range raw {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
+}
+
+func humanizeBytes(b int64) string {
+	if b == 0 {
+		return "0 B"
+	}
+	units := []string{"B", "KB", "MB", "GB"}
+	f := float64(b)
+	i := 0
+	for f >= 1024 && i < len(units)-1 {
+		f /= 1024
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%d B", b)
+	}
+	return fmt.Sprintf("%.1f %s", f, units[i])
+}
+
+func statusEmoji(code int) string {
+	switch {
+	case code >= 200 && code < 300:
+		return "✅"
+	case code >= 300 && code < 400:
+		return "↗️"
+	case code >= 400 && code < 500:
+		return "⚠️"
+	case code >= 500:
+		return "🔴"
+	default:
+		return "❓"
+	}
+}
+
+type kv struct {
+	key   string
+	count int
+}
+
+func sortMapByValue(m map[string]int, limit int) []kv {
+	pairs := make([]kv, 0, len(m))
+	for k, v := range m {
+		pairs = append(pairs, kv{k, v})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		return pairs[i].count > pairs[j].count
+	})
+	if len(pairs) > limit {
+		pairs = pairs[:limit]
+	}
+	return pairs
+}
+
+func sortedIntKeys(m map[int]int) []int {
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	return keys
+}
+
+func writeFile(path string, data []byte) error {
+	return os.WriteFile(path, data, 0644)
 }

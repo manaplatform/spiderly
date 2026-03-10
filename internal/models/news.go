@@ -17,25 +17,6 @@ type News struct {
 	Depth       int       `json:"depth"`
 }
 
-// CrawlStats holds crawling statistics
-type CrawlStats struct {
-	TotalURLs     int     `json:"total_urls"`
-	ProcessedURLs int     `json:"processed_urls"`
-	SuccessCount  int     `json:"success_count"`
-	ErrorCount    int     `json:"error_count"`
-	CurrentURL    string  `json:"current_url"`
-	ElapsedTime   string  `json:"elapsed_time"`
-	Progress      float64 `json:"progress"`
-	SitemapMode   bool    `json:"sitemap_mode"`
-	SitemapURLs   int     `json:"sitemap_urls"`
-	SitemapsFound int     `json:"sitemaps_found"`
-}
-
-// WebSocketMessage represents a message sent to the dashboard
-type WebSocketMessage struct {
-	Type    string      `json:"type"`
-	Payload interface{} `json:"payload"`
-}
 
 // LogEntry represents a log message
 type LogEntry struct {
@@ -44,22 +25,8 @@ type LogEntry struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// DiscoveredLink represents a discovered URL
-type DiscoveredLink struct {
-	URL      string `json:"url"`
-	Source   string `json:"source"`
-	Depth    int    `json:"depth"`
-	Priority string `json:"priority,omitempty"`
-	LastMod  string `json:"lastmod,omitempty"`
-}
 
-// SitemapURL represents a single URL entry in a sitemap
-type SitemapURL struct {
-	Loc        string  `xml:"loc" json:"loc"`
-	LastMod    string  `xml:"lastmod,omitempty" json:"lastmod,omitempty"`
-	ChangeFreq string  `xml:"changefreq,omitempty" json:"changefreq,omitempty"`
-	Priority   float64 `xml:"priority,omitempty" json:"priority,omitempty"`
-}
+
 
 // Sitemap represents a standard sitemap.xml structure
 type Sitemap struct {
@@ -67,17 +34,8 @@ type Sitemap struct {
 	URLs    []SitemapURL `xml:"url"`
 }
 
-// SitemapIndex represents a sitemap index file
-type SitemapIndex struct {
-	XMLName  xml.Name       `xml:"sitemapindex"`
-	Sitemaps []SitemapEntry `xml:"sitemap"`
-}
 
-// SitemapEntry represents an entry in a sitemap index
-type SitemapEntry struct {
-	Loc     string `xml:"loc" json:"loc"`
-	LastMod string `xml:"lastmod,omitempty" json:"lastmod,omitempty"`
-}
+
 
 // SitemapResult holds the result of sitemap parsing
 type SitemapResult struct {
@@ -86,4 +44,59 @@ type SitemapResult struct {
 	TotalURLs     int          `json:"total_urls"`
 	Source        string       `json:"source"`
 	ParsedAt      time.Time    `json:"parsed_at"`
+}
+
+
+// Sitemap XML structures
+type SitemapURL struct {
+	XMLName    xml.Name `xml:"url"`
+	Loc        string   `xml:"loc"`
+	LastMod    string   `xml:"lastmod,omitempty"`
+	ChangeFreq string   `xml:"changefreq,omitempty"`
+	Priority   float64  `xml:"priority,omitempty"`
+}
+
+
+
+type SitemapIndexEntry struct {
+	Loc     string `xml:"loc"`
+	LastMod string `xml:"lastmod,omitempty"`
+}
+
+type SitemapIndex struct {
+	XMLName  xml.Name            `xml:"sitemapindex"`
+	Sitemaps []SitemapIndexEntry `xml:"sitemap"`
+}
+
+// SitemapEntry represents a parsed sitemap URL with metadata
+type SitemapEntry struct {
+	URL        string
+	LastMod    string
+	ChangeFreq string
+	Priority   float64
+}
+
+// DiscoveredLink represents a link found during crawling
+type DiscoveredLink struct {
+	URL       string
+	SourceURL string
+	Depth     int
+	AnchorText string
+}
+
+// CrawlStats holds real-time crawling statistics
+type CrawlStats struct {
+	PagesScraped   int
+	PagesQueued    int
+	Errors         int
+	SitemapURLs    int
+	StartTime      time.Time
+	CurrentURL     string
+	Mode           string
+}
+
+// WebSocketMessage is the structure for real-time dashboard updates
+type WebSocketMessage struct {
+	Type string                 `json:"type"`
+	Data map[string]interface{} `json:"data,omitempty"`
 }
