@@ -1,0 +1,44 @@
+# Environment and artifacts
+.env
+.mana_index/
+.mana_llm_logs/
+
+# Build outputs
+bin/
+build/
+dist/
+out/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage
+*.test
+coverage.out
+*.coverprofile
+
+# Vendor directory (optional)
+vendor/
+
+# Editor/OS temporary files
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+*.orig
+.#*
+
+# IDEs and project files
+.vscode/
+.idea/
+*.code-workspace
+*.iml
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
