@@ -529,9 +529,24 @@ func tryHeuristics(doc *goquery.Selection) *models.ProductInfo {
 //   Price parsing
 // ──────────────────────────────────────────
 //
+// Replace your existing parsePrice in internal/extractor/extractor.go with this:
+
+func normalizePersianNumbers(input string) string {
+	persian := []string{"۰", "۱", "۲", "۳", "۴", "۵", "۶", "۷", "۸", "۹"}
+	arabic := []string{"٠", "١", "٢", "٣", "٤", "٥", "٦", "٧", "٨", "٩"}
+	english := []string{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
+
+	for i := 0; i < 10; i++ {
+		input = strings.ReplaceAll(input, persian[i], english[i])
+		input = strings.ReplaceAll(input, arabic[i], english[i])
+	}
+	return input
+}
 
 func parsePrice(v string) float64 {
+	// 1. Remove commas and currency text
 	v = strings.ReplaceAll(v, ",", "")
+	v = strings.ReplaceAll(v, "،", "") // Persian comma
 	v = strings.ReplaceAll(v, "$", "")
 	v = strings.ReplaceAll(v, "€", "")
 	v = strings.ReplaceAll(v, "£", "")
@@ -539,6 +554,10 @@ func parsePrice(v string) float64 {
 	v = strings.ReplaceAll(v, "ریال", "")
 	v = strings.TrimSpace(v)
 
+	// 2. Convert Persian/Arabic numbers to English (e.g., "۱۲۳" -> "123")
+	v = normalizePersianNumbers(v)
+
+	// 3. Extract the digits
 	r := regexp.MustCompile(`[\d.]+`)
 	n := r.FindString(v)
 
@@ -546,6 +565,7 @@ func parsePrice(v string) float64 {
 		return 0
 	}
 
+	// 4. Parse safely
 	val, _ := strconv.ParseFloat(n, 64)
 	return val
 }

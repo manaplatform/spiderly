@@ -44,6 +44,7 @@ func main() {
 	sitemapURL := flag.String("sitemap", "", "Direct sitemap URL to use instead of auto-discovery")
 	minPriority := flag.Float64("min-priority", 0, "Minimum sitemap priority to include (0.0 - 1.0)")
 	urlPattern := flag.String("url-pattern", "", "Regex pattern to filter sitemap URLs")
+	productPattern := flag.String("product-pattern", "", "Regex to identify product pages")
 
 	flag.Parse()
 
@@ -59,6 +60,9 @@ func main() {
 	//  Product Mode: Auto-enable chunked
 	// ─────────────────────────────────────────
 	if *productMode {
+		if *productPattern == "" {
+			*productPattern = "/product|/p/|/item/|/prd/|/goods/"
+		}
 		if !*chunked {
 			*chunked = true
 		}
@@ -94,6 +98,8 @@ func main() {
 		ChunkSize:      *chunkSize,
 		MaxWorkers:     *workers,
 		ProductMode:    *productMode,
+		ProductPattern: *productPattern,
+
 	}
 
 	e := core.NewCore(cfg)

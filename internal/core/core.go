@@ -79,6 +79,7 @@ type CoreConfig struct {
 	EnableChunker bool
 	ChunkSize     int
 	MaxWorkers    int
+	ProductPattern string
 
 	// Product mode settings
 	ProductMode      bool     // Enable product extraction
