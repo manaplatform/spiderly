@@ -1,6 +1,6 @@
 # 🕷️ Spiderly
 
-> **v1.0** — A high-performance, concurrent web crawler and scraper built in Go.
+> A high-performance, concurrent web crawler and scraper built in Go.
 
 Spiderly is a fast, flexible command-line web crawler designed for deep site exploration at scale. It leverages [Colly](https://github.com/gocolly/colly) for efficient crawling, [GoQuery](https://github.com/PuerkitoBio/goquery) for HTML parsing, and supports headless browser interactions via [ChromeDP](https://github.com/chromedp/chromedp). Spiderly can discover pages through XML sitemap parsing or recursive link following, process URLs in parallel chunks with a multi-worker pool, and export structured results to JSON or Markdown — all with a rich, colorized console experience.
 

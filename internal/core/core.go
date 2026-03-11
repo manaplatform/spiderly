@@ -56,6 +56,7 @@ const (
 // ─────────────────────────────────────────────
 
 // CoreConfig holds all configuration for the crawl core
+// CoreConfig holds all configuration for the crawl core
 type CoreConfig struct {
 	TargetURL  string
 	SitemapURL string
@@ -73,12 +74,19 @@ type CoreConfig struct {
 	Headless       bool
 	Verbose        bool
 	NoColor        bool
-	
+
 	// Chunker settings
-	EnableChunker bool // Enable parallel chunked processing
-	ChunkSize     int  // URLs per chunk
-	MaxWorkers    int  // Parallel workers
+	EnableChunker bool
+	ChunkSize     int
+	MaxWorkers    int
+
+	// Product mode settings
+	ProductMode      bool     // Enable product extraction
+	ProductSitemaps  []string // Filter to specific sitemap types (e.g., ["pdp"])
+	ExtractSpecs     bool     // Extract product specifications
+	ExtractImages    bool     // Extract all product images
 }
+
 
 // ─────────────────────────────────────────────
 //  Core Struct
@@ -463,8 +471,30 @@ type SummaryStats struct {
 }
 
 // ─────────────────────────────────────────────
-//  Exported Result Type
+//  Exported Result Type (with Product Support)
 // ─────────────────────────────────────────────
+
+// ProductResult holds product-specific data for export
+type ProductResult struct {
+	Name          string            `json:"name,omitempty"`
+	Brand         string            `json:"brand,omitempty"`
+	SKU           string            `json:"sku,omitempty"`
+	GTIN          string            `json:"gtin,omitempty"`
+	MPN           string            `json:"mpn,omitempty"`
+	Price         float64           `json:"price,omitempty"`
+	Currency      string            `json:"currency,omitempty"`
+	OriginalPrice float64           `json:"original_price,omitempty"`
+	Discount      float64           `json:"discount,omitempty"`
+	Availability  string            `json:"availability,omitempty"`
+	InStock       bool              `json:"in_stock"`
+	Rating        float64           `json:"rating,omitempty"`
+	ReviewCount   int               `json:"review_count,omitempty"`
+	Category      string            `json:"category,omitempty"`
+	Categories    []string          `json:"categories,omitempty"`
+	Images        []string          `json:"images,omitempty"`
+	Description   string            `json:"description,omitempty"`
+	Specs         map[string]string `json:"specs,omitempty"`
+}
 
 type ScrapedPageResult struct {
 	URL           string    `json:"url"`
@@ -483,7 +513,11 @@ type ScrapedPageResult struct {
 	LinksCount    int       `json:"links_count"`
 	ImagesCount   int       `json:"images_count"`
 	Depth         int       `json:"depth"`
+	PageType      string    `json:"page_type,omitempty"`
 	ScrapedAt     time.Time `json:"scraped_at"`
+	
+	// Product data (populated when ProductMode is enabled)
+	Product *ProductResult `json:"product,omitempty"`
 }
 
 func ToScrapedPageResults(pages []models.ScrapedPage) []ScrapedPageResult {
@@ -506,7 +540,32 @@ func ToScrapedPageResults(pages []models.ScrapedPage) []ScrapedPageResult {
 			LinksCount:    p.LinksCount,
 			ImagesCount:   p.ImagesCount,
 			Depth:         p.Depth,
+			PageType:      p.PageType,
 			ScrapedAt:     p.ScrapedAt,
+		}
+		
+		// Map product data if present
+		if p.Product != nil {
+			results[i].Product = &ProductResult{
+				Name:          p.Product.Name,
+				Brand:         p.Product.Brand,
+				SKU:           p.Product.SKU,
+				GTIN:          p.Product.GTIN,
+				MPN:           p.Product.MPN,
+				Price:         p.Product.Price,
+				Currency:      p.Product.Currency,
+				OriginalPrice: p.Product.OriginalPrice,
+				Discount:      p.Product.Discount,
+				Availability:  p.Product.Availability,
+				InStock:       p.Product.InStock,
+				Rating:        p.Product.Rating,
+				ReviewCount:   p.Product.ReviewCount,
+				Category:      p.Product.Category,
+				Categories:    p.Product.Categories,
+				Images:        p.Product.Images,
+				Description:   p.Product.Description,
+				Specs:         p.Product.Specs,
+			}
 		}
 	}
 	return results
@@ -640,67 +699,6 @@ func (c *Core) validateTargetURL() (string, error) {
 	}
 
 	return targetURL, nil
-}
-
-// ─────────────────────────────────────────────
-//  Crawl Strategy
-// ─────────────────────────────────────────────
-
-func (c *Core) determineCrawlStrategy(targetURL string) (string, []models.SitemapEntry, error) {
-	if c.config.ForceRecursive {
-		c.logger.Info("Forced recursive mode - skipping sitemap discovery")
-		return "recursive", nil, nil
-	}
-
-	if c.config.SitemapURL != "" {
-		c.logger.Verbose("Direct sitemap URL provided: %s", c.config.SitemapURL)
-		entries, err := c.fetchSitemapEntries(c.config.SitemapURL)
-		if err != nil {
-			return "recursive", nil, fmt.Errorf("failed to fetch provided sitemap: %w", err)
-		}
-		if len(entries) > 0 {
-			return "sitemap", entries, nil
-		}
-		return "recursive", nil, fmt.Errorf("provided sitemap was empty")
-	}
-
-	// Auto-discovery
-	c.logger.Phase("discovery", "Searching for sitemaps...")
-
-	parser := sitemap.NewParser(c.config.Timeout, c.config.Verbose)
-	sitemapURLs, err := parser.DiscoverSitemaps(targetURL)
-	if err != nil {
-		c.logger.Verbose("Sitemap discovery error: %v", err)
-	}
-
-	if len(sitemapURLs) == 0 {
-		c.logger.Warning("No sitemaps found - falling back to recursive crawl")
-		return "recursive", nil, nil
-	}
-
-	c.logger.Success("Found %d sitemap(s)", len(sitemapURLs))
-
-	// Parse all discovered sitemaps
-	var allEntries []models.SitemapEntry
-	for _, sitemapURL := range sitemapURLs {
-		c.logger.Verbose("Parsing: %s", sitemapURL)
-		entries, err := c.fetchSitemapEntries(sitemapURL)
-		if err != nil {
-			c.logger.Verbose("Failed to parse sitemap %s: %v", sitemapURL, err)
-			continue
-		}
-		allEntries = append(allEntries, entries...)
-	}
-
-	if len(allEntries) == 0 {
-		c.logger.Warning("All sitemaps were empty - falling back to recursive crawl")
-		return "recursive", nil, nil
-	}
-
-	filteredEntries := c.filterSitemapEntries(allEntries)
-	c.logger.SitemapStats(len(allEntries), len(filteredEntries), len(sitemapURLs))
-
-	return "sitemap", filteredEntries, nil
 }
 
 func (c *Core) fetchSitemapEntries(sitemapURL string) ([]models.SitemapEntry, error) {
@@ -941,4 +939,159 @@ func statusEmoji(code int) string {
 	default:
 		return "❓"
 	}
+}
+// ─────────────────────────────────────────────
+//  Crawl Strategy (updated for Product Mode)
+// ─────────────────────────────────────────────
+
+func (c *Core) determineCrawlStrategy(targetURL string) (string, []models.SitemapEntry, error) {
+	if c.config.ForceRecursive {
+		c.logger.Info("Forced recursive mode - skipping sitemap discovery")
+		return "recursive", nil, nil
+	}
+
+	// ── Direct sitemap URL provided ──
+	if c.config.SitemapURL != "" {
+		c.logger.Verbose("Direct sitemap URL provided: %s", c.config.SitemapURL)
+		entries, err := c.fetchSitemapEntries(c.config.SitemapURL)
+		if err != nil {
+			return "recursive", nil, fmt.Errorf("failed to fetch provided sitemap: %w", err)
+		}
+		if len(entries) > 0 {
+			filteredEntries := c.filterSitemapEntries(entries)
+			if c.config.ProductMode {
+				filteredEntries = c.filterProductEntries(filteredEntries)
+			}
+			if len(filteredEntries) > 0 {
+				return "sitemap", filteredEntries, nil
+			}
+			c.logger.Warning("All entries filtered out — falling back to unfiltered")
+			return "sitemap", entries, nil
+		}
+		return "recursive", nil, fmt.Errorf("provided sitemap was empty")
+	}
+
+	// ── Auto-discovery ──
+	c.logger.Phase("discovery", "Searching for sitemaps...")
+
+	parser := sitemap.NewParser(c.config.Timeout, c.config.Verbose)
+
+	var sitemapURLs []string
+	var err error
+
+	// In product mode, try to discover only product-related sitemaps first
+	if c.config.ProductMode {
+		c.logger.Info("Product mode enabled — prioritizing product sitemaps")
+
+		// Build filter list from config + defaults
+		filters := []string{"pdp", "product"}
+		if len(c.config.ProductSitemaps) > 0 {
+			filters = c.config.ProductSitemaps
+		}
+
+		sitemapURLs, err = parser.DiscoverSitemapsFiltered(targetURL, filters)
+		if err != nil {
+			c.logger.Verbose("Filtered sitemap discovery error: %v", err)
+		}
+
+		if len(sitemapURLs) == 0 {
+			c.logger.Warning("No product-specific sitemaps found — trying all sitemaps")
+			sitemapURLs, err = parser.DiscoverSitemaps(targetURL)
+			if err != nil {
+				c.logger.Verbose("Sitemap discovery error: %v", err)
+			}
+		} else {
+			c.logger.Success("Found %d product sitemap(s)", len(sitemapURLs))
+		}
+	} else {
+		sitemapURLs, err = parser.DiscoverSitemaps(targetURL)
+		if err != nil {
+			c.logger.Verbose("Sitemap discovery error: %v", err)
+		}
+	}
+
+	if len(sitemapURLs) == 0 {
+		c.logger.Warning("No sitemaps found - falling back to recursive crawl")
+		return "recursive", nil, nil
+	}
+
+	c.logger.Success("Found %d sitemap(s)", len(sitemapURLs))
+
+	// Parse all discovered sitemaps
+	var allEntries []models.SitemapEntry
+	for _, sitemapURL := range sitemapURLs {
+		c.logger.Verbose("Parsing: %s", sitemapURL)
+		entries, err := c.fetchSitemapEntries(sitemapURL)
+		if err != nil {
+			c.logger.Verbose("Failed to parse sitemap %s: %v", sitemapURL, err)
+			continue
+		}
+		allEntries = append(allEntries, entries...)
+	}
+
+	if len(allEntries) == 0 {
+		c.logger.Warning("All sitemaps were empty - falling back to recursive crawl")
+		return "recursive", nil, nil
+	}
+
+	// Apply standard filters (priority, URL pattern)
+	filteredEntries := c.filterSitemapEntries(allEntries)
+
+	// Apply product mode filter on top
+	if c.config.ProductMode {
+		filteredEntries = c.filterProductEntries(filteredEntries)
+	}
+
+	c.logger.SitemapStats(len(allEntries), len(filteredEntries), len(sitemapURLs))
+
+	if len(filteredEntries) == 0 {
+		c.logger.Warning("All entries were filtered out — using unfiltered entries")
+		filteredEntries = allEntries
+	}
+
+	return "sitemap", filteredEntries, nil
+}
+
+// ─────────────────────────────────────────────
+//  Product Filtering
+// ─────────────────────────────────────────────
+
+// filterProductEntries applies product-mode heuristics to keep only product page URLs.
+// It checks: (1) sitemap type tags, (2) explicit regex pattern, (3) URL heuristics.
+func (c *Core) filterProductEntries(entries []models.SitemapEntry) []models.SitemapEntry {
+	var productURLRegex *regexp.Regexp
+	if c.config.URLPattern != "" {
+		var err error
+		productURLRegex, err = regexp.Compile(c.config.URLPattern)
+		if err != nil {
+			c.logger.Warning("Invalid product URL pattern: %v — using heuristics only", err)
+			productURLRegex = nil
+		}
+	}
+
+	var filtered []models.SitemapEntry
+	for _, entry := range entries {
+		// 1. If entry type is already tagged as "pdp" or "product", keep it
+		if entry.Type == "pdp" || entry.Type == "product" {
+			filtered = append(filtered, entry)
+			continue
+		}
+
+		// 2. Check against explicit regex pattern
+		if productURLRegex != nil {
+			if productURLRegex.MatchString(entry.URL) {
+				filtered = append(filtered, entry)
+				continue
+			}
+		}
+
+		// 3. Fall back to heuristic detection
+		if sitemap.IsLikelyProductURL(entry.URL) {
+			filtered = append(filtered, entry)
+			continue
+		}
+	}
+
+	c.logger.Verbose("Product filter: %d → %d entries", len(entries), len(filtered))
+	return filtered
 }
