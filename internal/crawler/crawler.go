@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"spiderly/internal/models"
+	"spiderly/internal/extractor" // NEW: Import product extractor
 
 	"github.com/gocolly/colly/v2"
 )
@@ -22,6 +23,7 @@ type Config struct {
 	Timeout     time.Duration
 	Headless    bool
 	SitemapMode bool
+	ProductMode bool // NEW: Enable product extraction
 }
 
 // Callbacks for real-time updates
@@ -163,6 +165,16 @@ func (c *Crawler) handlePage(e *colly.HTMLElement) {
 	
 	// Extract body text (simplified)
 	page.BodyText = extractBodyText(e)
+	
+	// === NEW: Product extraction ===
+	if c.config.ProductMode {
+		product := extractor.ExtractProduct(e.DOM, pageURL)
+		if product != nil {
+			page.Product = product
+			page.PageType = "product"
+		}
+	}
+	// === END NEW ===
 	
 	c.results = append(c.results, page)
 	

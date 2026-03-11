@@ -1,594 +1,551 @@
 package extractor
 
 import (
+	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"spiderly/internal/models"
+
 	"github.com/PuerkitoBio/goquery"
 )
 
-// ProductData holds extracted product information
-type ProductData struct {
-	Name         string   `json:"name,omitempty"`
-	Brand        string   `json:"brand,omitempty"`
-	SKU          string   `json:"sku,omitempty"`
-	GTIN         string   `json:"gtin,omitempty"`
-	MPN          string   `json:"mpn,omitempty"`
-	Price        float64  `json:"price,omitempty"`
-	Currency     string   `json:"currency,omitempty"`
-	OriginalPrice float64 `json:"original_price,omitempty"`
-	Discount     float64  `json:"discount,omitempty"`
-	Availability string   `json:"availability,omitempty"`
-	InStock      bool     `json:"in_stock"`
-	Rating       float64  `json:"rating,omitempty"`
-	ReviewCount  int      `json:"review_count,omitempty"`
-	Category     string   `json:"category,omitempty"`
-	Categories   []string `json:"categories,omitempty"`
-	Images       []string `json:"images,omitempty"`
-	Description  string   `json:"description,omitempty"`
-	Specs        map[string]string `json:"specs,omitempty"`
-}
+//
+// ──────────────────────────────────────────
+//   PRICE NORMALIZATION
+// ──────────────────────────────────────────
+//
 
-// ProductExtractor extracts product data from HTML
-type ProductExtractor struct {
-	doc *goquery.Document
-}
-
-// NewProductExtractor creates a new product extractor
-func NewProductExtractor(doc *goquery.Document) *ProductExtractor {
-	return &ProductExtractor{doc: doc}
-}
-
-// Extract extracts all product data from the document
-func (pe *ProductExtractor) Extract() *ProductData {
-	product := &ProductData{
-		Specs: make(map[string]string),
+func normalizePrimaryPrice(p *models.ProductInfo) {
+	if p == nil || len(p.Prices) == 0 {
+		return
 	}
 
-	// Try JSON-LD first (most reliable)
-	pe.extractJSONLD(product)
+	best := p.Prices[0] // first price = canonical primary price
+	p.Price = best.Amount
+	p.Currency = best.Currency
+	p.InStock = best.InStock
 
-	// Then try Open Graph
-	pe.extractOpenGraph(product)
-
-	// Then try meta tags
-	pe.extractMetaTags(product)
-
-	// Then try common selectors
-	pe.extractFromSelectors(product)
-
-	// Extract images
-	pe.extractImages(product)
-
-	// Extract specs/attributes
-	pe.extractSpecs(product)
-
-	// Calculate discount if we have both prices
-	if product.OriginalPrice > 0 && product.Price > 0 && product.Price < product.OriginalPrice {
-		product.Discount = ((product.OriginalPrice - product.Price) / product.OriginalPrice) * 100
+	if p.OriginalPrice > 0 && p.Price > 0 {
+		p.Discount = (1 - (p.Price / p.OriginalPrice)) * 100
+		if p.Discount < 0 {
+			p.Discount = 0
+		}
 	}
-
-	return product
 }
 
-func (pe *ProductExtractor) extractJSONLD(product *ProductData) {
-	pe.doc.Find(`script[type="application/ld+json"]`).Each(func(i int, s *goquery.Selection) {
-		jsonText := s.Text()
+//
+// ──────────────────────────────────────────
+//   MAIN EXTRACTION ROUTINE
+// ──────────────────────────────────────────
+//
 
-		// Check if it's a Product schema
-		if !strings.Contains(jsonText, `"@type"`) {
+func ExtractProduct(doc *goquery.Selection, pageURL string) *models.ProductInfo {
+	final := &models.ProductInfo{
+		Prices: []models.PriceInfo{},
+	}
+
+	// 1. METADATA FIRST (Title / Description / OG)
+	extractMetadata(doc, final)
+
+	// 2. JSON-LD (highest priority)
+	if p := tryJSONLD(doc); p != nil {
+		mergeProduct(final, p)
+	}
+
+	// 3. OpenGraph
+	if p := tryOpenGraph(doc); p != nil {
+		mergeProduct(final, p)
+	}
+
+	// 4. Microdata
+	if p := tryMicrodata(doc); p != nil {
+		mergeProduct(final, p)
+	}
+
+	// 5. Heuristics (last fallback)
+	if p := tryHeuristics(doc); p != nil {
+		mergeProduct(final, p)
+	}
+
+	// Nothing valid found
+	if final.Name == "" && len(final.Prices) == 0 {
+		return nil
+	}
+
+	final.SourceURL = pageURL
+	normalizePrimaryPrice(final)
+
+	return final
+}
+
+//
+// ──────────────────────────────────────────
+//   METADATA EXTRACTION (NEW)
+// ──────────────────────────────────────────
+//
+
+func extractMetadata(doc *goquery.Selection, p *models.ProductInfo) {
+
+	title := strings.TrimSpace(doc.Find("head title").Text())
+	if p.Name == "" && title != "" {
+		p.Name = title
+	}
+
+	doc.Find("meta").Each(func(_ int, s *goquery.Selection) {
+
+		name := s.AttrOr("name", "")
+		prop := s.AttrOr("property", "")
+		content := s.AttrOr("content", "")
+
+		switch name {
+		case "description":
+			if p.Description == "" {
+				p.Description = content
+			}
+		case "keywords":
+			if p.Keywords == "" {
+				p.Keywords = content
+			}
+		}
+
+		switch prop {
+		case "og:title":
+			if p.Name == "" {
+				p.Name = content
+			}
+		case "og:description":
+			if p.Description == "" {
+				p.Description = content
+			}
+		case "og:url":
+			if p.CanonicalURL == "" {
+				p.CanonicalURL = content
+			}
+		case "og:image":
+			if content != "" {
+				p.Images = append(p.Images, content)
+			}
+		case "twitter:image":
+			if content != "" {
+				p.Images = append(p.Images, content)
+			}
+		}
+	})
+}
+
+//
+// ──────────────────────────────────────────
+//   SMART MERGE LOGIC (NEW)
+// ──────────────────────────────────────────
+//
+
+func mergeProduct(base *models.ProductInfo, incoming *models.ProductInfo) {
+	if incoming == nil {
+		return
+	}
+
+	// Basic fields
+	if base.Name == "" && incoming.Name != "" {
+		base.Name = incoming.Name
+	}
+	if base.Brand == "" && incoming.Brand != "" {
+		base.Brand = incoming.Brand
+	}
+	if base.SKU == "" && incoming.SKU != "" {
+		base.SKU = incoming.SKU
+	}
+	if base.Description == "" && incoming.Description != "" {
+		base.Description = incoming.Description
+	}
+	if base.CanonicalURL == "" && incoming.CanonicalURL != "" {
+		base.CanonicalURL = incoming.CanonicalURL
+	}
+
+	// Images (append but avoid duplicates)
+	existing := map[string]bool{}
+	for _, img := range base.Images {
+		existing[img] = true
+	}
+	for _, img := range incoming.Images {
+		if !existing[img] && img != "" {
+			base.Images = append(base.Images, img)
+		}
+	}
+
+	// Prices (append unique sellers)
+	priceSeen := map[string]bool{}
+	for _, pr := range base.Prices {
+		key := pr.Currency + "_" + strconv.FormatFloat(pr.Amount, 'f', -1, 64)
+		priceSeen[key] = true
+	}
+	for _, pr := range incoming.Prices {
+		key := pr.Currency + "_" + strconv.FormatFloat(pr.Amount, 'f', -1, 64)
+		if pr.Amount > 0 && !priceSeen[key] {
+			base.Prices = append(base.Prices, pr)
+		}
+	}
+
+	// Stock
+	if !base.InStock && incoming.InStock {
+		base.InStock = true
+	}
+
+	// Original Price
+	if base.OriginalPrice == 0 && incoming.OriginalPrice > 0 {
+		base.OriginalPrice = incoming.OriginalPrice
+	}
+}
+
+//
+// ──────────────────────────────────────────
+//   JSON-LD
+// ──────────────────────────────────────────
+//
+
+func tryJSONLD(doc *goquery.Selection) *models.ProductInfo {
+	var result *models.ProductInfo
+
+	doc.Find(`script[type="application/ld+json"]`).Each(func(_ int, s *goquery.Selection) {
+		if result != nil {
 			return
 		}
 
-		if strings.Contains(jsonText, `"Product"`) || strings.Contains(jsonText, `"product"`) {
-			// Extract name
-			if product.Name == "" {
-				product.Name = extractJSONValue(jsonText, "name")
-			}
+		raw := strings.TrimSpace(s.Text())
+		if raw == "" {
+			return
+		}
 
-			// Extract brand
-			if product.Brand == "" {
-				product.Brand = extractJSONValue(jsonText, "brand")
-				if product.Brand == "" {
-					// Try nested brand object
-					if strings.Contains(jsonText, `"brand":{`) {
-						product.Brand = extractNestedJSONValue(jsonText, "brand", "name")
-					}
+		var data interface{}
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			return
+		}
+
+		switch v := data.(type) {
+		case map[string]interface{}:
+			if isProductJSONLD(v) {
+				result = parseJSONLDProduct(v)
+			}
+		case []interface{}:
+			for _, item := range v {
+				if m, ok := item.(map[string]interface{}); ok && isProductJSONLD(m) {
+					result = parseJSONLDProduct(m)
+					return
 				}
-			}
-
-			// Extract SKU
-			if product.SKU == "" {
-				product.SKU = extractJSONValue(jsonText, "sku")
-			}
-
-			// Extract GTIN
-			if product.GTIN == "" {
-				product.GTIN = extractJSONValue(jsonText, "gtin13")
-				if product.GTIN == "" {
-					product.GTIN = extractJSONValue(jsonText, "gtin")
-				}
-			}
-
-			// Extract MPN
-			if product.MPN == "" {
-				product.MPN = extractJSONValue(jsonText, "mpn")
-			}
-
-			// Extract price from offers
-			if product.Price == 0 {
-				priceStr := extractJSONValue(jsonText, "price")
-				if priceStr != "" {
-					product.Price = parsePrice(priceStr)
-				}
-			}
-
-			// Extract currency
-			if product.Currency == "" {
-				product.Currency = extractJSONValue(jsonText, "priceCurrency")
-			}
-
-			// Extract availability
-			if product.Availability == "" {
-				product.Availability = extractJSONValue(jsonText, "availability")
-				product.InStock = isInStock(product.Availability)
-			}
-
-			// Extract rating
-			if product.Rating == 0 {
-				ratingStr := extractJSONValue(jsonText, "ratingValue")
-				if ratingStr != "" {
-					product.Rating, _ = strconv.ParseFloat(ratingStr, 64)
-				}
-			}
-
-			// Extract review count
-			if product.ReviewCount == 0 {
-				reviewStr := extractJSONValue(jsonText, "reviewCount")
-				if reviewStr != "" {
-					product.ReviewCount, _ = strconv.Atoi(reviewStr)
-				}
-			}
-
-			// Extract description
-			if product.Description == "" {
-				product.Description = extractJSONValue(jsonText, "description")
 			}
 		}
 	})
+
+	return result
 }
 
-func (pe *ProductExtractor) extractOpenGraph(product *ProductData) {
-	// og:product:price:amount
-	if product.Price == 0 {
-		if price, exists := pe.doc.Find(`meta[property="og:product:price:amount"]`).Attr("content"); exists {
-			product.Price = parsePrice(price)
-		}
-		if price, exists := pe.doc.Find(`meta[property="product:price:amount"]`).Attr("content"); exists {
-			product.Price = parsePrice(price)
-		}
-	}
-
-	// og:product:price:currency
-	if product.Currency == "" {
-		if currency, exists := pe.doc.Find(`meta[property="og:product:price:currency"]`).Attr("content"); exists {
-			product.Currency = currency
-		}
-		if currency, exists := pe.doc.Find(`meta[property="product:price:currency"]`).Attr("content"); exists {
-			product.Currency = currency
-		}
-	}
-
-	// og:product:availability
-	if product.Availability == "" {
-		if avail, exists := pe.doc.Find(`meta[property="og:availability"]`).Attr("content"); exists {
-			product.Availability = avail
-			product.InStock = isInStock(avail)
-		}
-		if avail, exists := pe.doc.Find(`meta[property="product:availability"]`).Attr("content"); exists {
-			product.Availability = avail
-			product.InStock = isInStock(avail)
-		}
-	}
-
-	// og:product:brand
-	if product.Brand == "" {
-		if brand, exists := pe.doc.Find(`meta[property="og:product:brand"]`).Attr("content"); exists {
-			product.Brand = brand
-		}
-		if brand, exists := pe.doc.Find(`meta[property="product:brand"]`).Attr("content"); exists {
-			product.Brand = brand
-		}
-	}
+func isProductJSONLD(m map[string]interface{}) bool {
+	t, ok := m["@type"].(string)
+	return ok && strings.ToLower(t) == "product"
 }
 
-func (pe *ProductExtractor) extractMetaTags(product *ProductData) {
-	// Twitter product cards
-	if product.Price == 0 {
-		if price, exists := pe.doc.Find(`meta[name="twitter:data1"]`).Attr("content"); exists {
-			product.Price = parsePrice(price)
+//
+// ──────────────────────────────────────────
+//   JSON-LD Parsing
+// ──────────────────────────────────────────
+//
+
+func parseJSONLDProduct(data map[string]interface{}) *models.ProductInfo {
+	p := &models.ProductInfo{
+		Prices: []models.PriceInfo{},
+	}
+
+	if name, ok := data["name"].(string); ok {
+		p.Name = name
+	}
+	if sku, ok := data["sku"].(string); ok {
+		p.SKU = sku
+	}
+
+	// Brand
+	switch b := data["brand"].(type) {
+	case string:
+		p.Brand = b
+	case map[string]interface{}:
+		if bn, ok := b["name"].(string); ok {
+			p.Brand = bn
 		}
 	}
-}
 
-func (pe *ProductExtractor) extractFromSelectors(product *ProductData) {
-	// Common product name selectors
-	if product.Name == "" {
-		nameSelectors := []string{
-			`h1[itemprop="name"]`,
-			`.product-title h1`,
-			`.product-name h1`,
-			`.product-name`,
-			`.product-title`,
-			`h1.title`,
-			`[data-testid="product-title"]`,
-			`.pdp-title`,
-			`#product-name`,
-		}
-		for _, sel := range nameSelectors {
-			if name := strings.TrimSpace(pe.doc.Find(sel).First().Text()); name != "" {
-				product.Name = name
-				break
+	// Images
+	switch img := data["image"].(type) {
+	case string:
+		p.Images = append(p.Images, img)
+	case []interface{}:
+		for _, i := range img {
+			if s, ok := i.(string); ok {
+				p.Images = append(p.Images, s)
 			}
 		}
 	}
 
-	// Common price selectors
-	if product.Price == 0 {
-		priceSelectors := []string{
-			`[itemprop="price"]`,
-			`.product-price`,
-			`.price-current`,
-			`.current-price`,
-			`.sale-price`,
-			`.final-price`,
-			`[data-testid="product-price"]`,
-			`.pdp-price`,
-			`#product-price`,
-			`.price`,
+	// Offers
+	switch offers := data["offers"].(type) {
+	case map[string]interface{}:
+		if pr := extractPriceFromOffer(offers); pr != nil {
+			p.Prices = append(p.Prices, *pr)
 		}
-		for _, sel := range priceSelectors {
-			elem := pe.doc.Find(sel).First()
-			if priceStr := elem.AttrOr("content", ""); priceStr != "" {
-				product.Price = parsePrice(priceStr)
-				break
-			}
-			if priceStr := strings.TrimSpace(elem.Text()); priceStr != "" {
-				product.Price = parsePrice(priceStr)
-				if product.Price > 0 {
-					break
+	case []interface{}:
+		for _, of := range offers {
+			if m, ok := of.(map[string]interface{}); ok {
+				if pr := extractPriceFromOffer(m); pr != nil {
+					p.Prices = append(p.Prices, *pr)
 				}
 			}
 		}
 	}
 
-	// Original price selectors
-	if product.OriginalPrice == 0 {
-		origPriceSelectors := []string{
-			`.original-price`,
-			`.old-price`,
-			`.was-price`,
-			`.list-price`,
-			`.regular-price`,
-			`[data-testid="original-price"]`,
-			`.price-old`,
-			`del.price`,
-			`s.price`,
-		}
-		for _, sel := range origPriceSelectors {
-			if priceStr := strings.TrimSpace(pe.doc.Find(sel).First().Text()); priceStr != "" {
-				product.OriginalPrice = parsePrice(priceStr)
-				if product.OriginalPrice > 0 {
-					break
-				}
-			}
+	return p
+}
+
+//
+// ──────────────────────────────────────────
+//   Extract price block from JSON-LD offer
+// ──────────────────────────────────────────
+//
+
+func extractPriceFromOffer(m map[string]interface{}) *models.PriceInfo {
+	pr := &models.PriceInfo{}
+
+	// Price
+	switch raw := m["price"].(type) {
+	case string:
+		pr.Amount = parsePrice(raw)
+	case float64:
+		pr.Amount = raw
+	}
+
+	// Currency
+	if c, ok := m["priceCurrency"].(string); ok {
+		pr.Currency = c
+	}
+
+	// Seller
+	switch seller := m["seller"].(type) {
+	case string:
+		pr.Seller = seller
+	case map[string]interface{}:
+		if n, ok := seller["name"].(string); ok {
+			pr.Seller = n
 		}
 	}
 
-	// Brand selectors
-	if product.Brand == "" {
-		brandSelectors := []string{
-			`[itemprop="brand"]`,
-			`.product-brand`,
-			`.brand-name`,
-			`[data-testid="product-brand"]`,
-			`.pdp-brand`,
-		}
-		for _, sel := range brandSelectors {
-			elem := pe.doc.Find(sel).First()
-			if brand := elem.AttrOr("content", ""); brand != "" {
-				product.Brand = brand
-				break
-			}
-			if brand := strings.TrimSpace(elem.Text()); brand != "" {
-				product.Brand = brand
-				break
-			}
-		}
+	// Availability
+	if a, ok := m["availability"].(string); ok {
+		pr.InStock = strings.Contains(strings.ToLower(a), "instock")
 	}
 
-	// SKU selectors
-	if product.SKU == "" {
-		skuSelectors := []string{
-			`[itemprop="sku"]`,
-			`.product-sku`,
-			`.sku`,
-			`[data-sku]`,
-		}
-		for _, sel := range skuSelectors {
-			elem := pe.doc.Find(sel).First()
-			if sku := elem.AttrOr("content", ""); sku != "" {
-				product.SKU = sku
-				break
-			}
-			if sku := elem.AttrOr("data-sku", ""); sku != "" {
-				product.SKU = sku
-				break
-			}
-			if sku := strings.TrimSpace(elem.Text()); sku != "" {
-				product.SKU = sku
-				break
-			}
-		}
+	if pr.Amount > 0 {
+		return pr
 	}
+	return nil
+}
 
-	// Availability selectors
-	if product.Availability == "" {
-		availSelectors := []string{
-			`[itemprop="availability"]`,
-			`.product-availability`,
-			`.stock-status`,
-			`.availability`,
-		}
-		for _, sel := range availSelectors {
-			elem := pe.doc.Find(sel).First()
-			if avail := elem.AttrOr("content", ""); avail != "" {
-				product.Availability = avail
-				product.InStock = isInStock(avail)
-				break
-			}
-			if avail := elem.AttrOr("href", ""); avail != "" {
-				product.Availability = avail
-				product.InStock = isInStock(avail)
-				break
-			}
-			if avail := strings.TrimSpace(elem.Text()); avail != "" {
-				product.Availability = avail
-				product.InStock = isInStock(avail)
-				break
-			}
-		}
-	}
+//
+// ──────────────────────────────────────────
+//   OpenGraph
+// ──────────────────────────────────────────
+//
 
-	// Rating selectors
-	if product.Rating == 0 {
-		ratingSelectors := []string{
-			`[itemprop="ratingValue"]`,
-			`.product-rating`,
-			`.rating-value`,
-		}
-		for _, sel := range ratingSelectors {
-			elem := pe.doc.Find(sel).First()
-			if rating := elem.AttrOr("content", ""); rating != "" {
-				product.Rating, _ = strconv.ParseFloat(rating, 64)
-				break
-			}
-		}
-	}
+func tryOpenGraph(doc *goquery.Selection) *models.ProductInfo {
+	p := &models.ProductInfo{Prices: []models.PriceInfo{}}
+	found := false
 
-	// Categories
-	pe.doc.Find(`[itemprop="itemListElement"]`).Each(func(i int, s *goquery.Selection) {
-		if name := strings.TrimSpace(s.Find(`[itemprop="name"]`).Text()); name != "" {
-			product.Categories = append(product.Categories, name)
+	doc.Find("meta").Each(func(_ int, s *goquery.Selection) {
+		prop := s.AttrOr("property", "")
+		content := s.AttrOr("content", "")
+
+		switch prop {
+		case "og:title":
+			p.Name = content
+			found = true
+		case "og:description":
+			p.Description = content
+			found = true
+		case "og:image":
+			p.Images = append(p.Images, content)
+			found = true
+		case "product:brand":
+			p.Brand = content
+			found = true
+		case "product:price:amount":
+			amount := parsePrice(content)
+			if amount > 0 {
+				p.Prices = append(p.Prices, models.PriceInfo{Amount: amount})
+				found = true
+			}
+		case "product:price:currency":
+			if len(p.Prices) > 0 {
+				p.Prices[0].Currency = content
+			}
+		case "product:availability":
+			p.InStock = strings.Contains(strings.ToLower(content), "instock")
+			found = true
 		}
 	})
 
-	if len(product.Categories) > 0 {
-		product.Category = strings.Join(product.Categories, " > ")
+	if found {
+		return p
 	}
+	return nil
 }
 
-func (pe *ProductExtractor) extractImages(product *ProductData) {
-	seen := make(map[string]bool)
+//
+// ──────────────────────────────────────────
+//   Microdata
+// ──────────────────────────────────────────
+//
 
-	// Main product image
-	mainImageSelectors := []string{
-		`[itemprop="image"]`,
-		`.product-image img`,
-		`.main-image img`,
-		`.gallery-main img`,
-		`[data-testid="product-image"]`,
-		`.pdp-image img`,
+func tryMicrodata(doc *goquery.Selection) *models.ProductInfo {
+	p := &models.ProductInfo{Prices: []models.PriceInfo{}}
+	found := false
+
+	doc.Find("[itemprop]").Each(func(_ int, s *goquery.Selection) {
+		prop := s.AttrOr("itemprop", "")
+		val := s.AttrOr("content", "")
+		if val == "" {
+			val = strings.TrimSpace(s.Text())
+		}
+
+		switch prop {
+		case "name":
+			p.Name = val
+			found = true
+		case "price":
+			amount := parsePrice(val)
+			if amount > 0 {
+				p.Prices = append(p.Prices, models.PriceInfo{Amount: amount})
+				found = true
+			}
+		case "priceCurrency":
+			if len(p.Prices) > 0 {
+				p.Prices[0].Currency = val
+			}
+		case "brand":
+			p.Brand = val
+			found = true
+		case "sku":
+			p.SKU = val
+			found = true
+		case "image":
+			src := s.AttrOr("src", "")
+			if src == "" {
+				src = val
+			}
+			p.Images = append(p.Images, src)
+			found = true
+		case "availability":
+			p.InStock = strings.Contains(strings.ToLower(val), "instock")
+			found = true
+		}
+	})
+
+	if found {
+		return p
+	}
+	return nil
+}
+
+//
+// ──────────────────────────────────────────
+//   Heuristic fallback
+// ──────────────────────────────────────────
+//
+
+func tryHeuristics(doc *goquery.Selection) *models.ProductInfo {
+	p := &models.ProductInfo{Prices: []models.PriceInfo{}}
+	found := false
+
+	titleSelectors := []string{
+		"h1.product-title",
+		"h1.product-name",
+		"h1",
 	}
 
-	for _, sel := range mainImageSelectors {
-		pe.doc.Find(sel).Each(func(i int, s *goquery.Selection) {
-			if src := getImageSrc(s); src != "" && !seen[src] {
-				seen[src] = true
-				product.Images = append(product.Images, src)
+	for _, sel := range titleSelectors {
+		if t := strings.TrimSpace(doc.Find(sel).First().Text()); t != "" {
+			p.Name = t
+			found = true
+			break
+		}
+	}
+
+	priceSelectors := []string{
+		".price", "[class*='price']", "[id*='price']",
+	}
+
+	for _, sel := range priceSelectors {
+		doc.Find(sel).Each(func(_ int, s *goquery.Selection) {
+			text := strings.TrimSpace(s.Text())
+			amount := parsePrice(text)
+			if amount > 0 {
+				pr := models.PriceInfo{Amount: amount}
+
+				if strings.Contains(text, "$") {
+					pr.Currency = "USD"
+				} else if strings.Contains(text, "€") {
+					pr.Currency = "EUR"
+				} else if strings.Contains(text, "£") {
+					pr.Currency = "GBP"
+				} else if strings.Contains(text, "تومان") {
+					pr.Currency = "IRR"
+				}
+
+				p.Prices = append(p.Prices, pr)
+				found = true
 			}
 		})
 	}
 
-	// Gallery images
-	gallerySelectors := []string{
-		`.product-gallery img`,
-		`.gallery-thumbs img`,
-		`.product-thumbs img`,
-		`[data-gallery] img`,
+	imageSelectors := []string{
+		".product-image img",
+		"[class*='product'] img",
 	}
 
-	for _, sel := range gallerySelectors {
-		pe.doc.Find(sel).Each(func(i int, s *goquery.Selection) {
-			if src := getImageSrc(s); src != "" && !seen[src] {
-				seen[src] = true
-				product.Images = append(product.Images, src)
-			}
-		})
-	}
-}
-
-func (pe *ProductExtractor) extractSpecs(product *ProductData) {
-	// Common spec table patterns
-	specSelectors := []string{
-		`.product-specs tr`,
-		`.specifications tr`,
-		`.tech-specs tr`,
-		`table.specs tr`,
-		`[itemprop="additionalProperty"]`,
-	}
-
-	for _, sel := range specSelectors {
-		pe.doc.Find(sel).Each(func(i int, s *goquery.Selection) {
-			var key, value string
-
-			// Try th/td pattern
-			if th := s.Find("th").First(); th.Length() > 0 {
-				key = strings.TrimSpace(th.Text())
-				value = strings.TrimSpace(s.Find("td").First().Text())
-			}
-
-			// Try itemprop pattern
-			if key == "" {
-				key = s.AttrOr("itemprop", "")
-				if key == "" {
-					key = strings.TrimSpace(s.Find(`[itemprop="name"]`).Text())
-				}
-				value = strings.TrimSpace(s.Find(`[itemprop="value"]`).Text())
-			}
-
-			// Try two td pattern
-			if key == "" {
-				tds := s.Find("td")
-				if tds.Length() >= 2 {
-					key = strings.TrimSpace(tds.Eq(0).Text())
-					value = strings.TrimSpace(tds.Eq(1).Text())
-				}
-			}
-
-			if key != "" && value != "" {
-				key = strings.TrimSuffix(key, ":")
-				product.Specs[key] = value
+	for _, sel := range imageSelectors {
+		doc.Find(sel).Each(func(_ int, s *goquery.Selection) {
+			src := s.AttrOr("src", "")
+			if src != "" {
+				p.Images = append(p.Images, src)
+				found = true
 			}
 		})
 	}
 
-	// Definition list pattern
-	pe.doc.Find(".product-specs dl, .specifications dl").Each(func(i int, s *goquery.Selection) {
-		dts := s.Find("dt")
-		dds := s.Find("dd")
-		for j := 0; j < dts.Length() && j < dds.Length(); j++ {
-			key := strings.TrimSpace(dts.Eq(j).Text())
-			value := strings.TrimSpace(dds.Eq(j).Text())
-			if key != "" && value != "" {
-				key = strings.TrimSuffix(key, ":")
-				product.Specs[key] = value
-			}
-		}
-	})
+	if found {
+		return p
+	}
+	return nil
 }
 
-// Helper functions
+//
+// ──────────────────────────────────────────
+//   Price parsing
+// ──────────────────────────────────────────
+//
 
-func extractJSONValue(json, key string) string {
-	patterns := []string{
-		`"` + key + `"\s*:\s*"([^"]*)"`,
-		`"` + key + `"\s*:\s*(\d+\.?\d*)`,
-	}
+func parsePrice(v string) float64 {
+	v = strings.ReplaceAll(v, ",", "")
+	v = strings.ReplaceAll(v, "$", "")
+	v = strings.ReplaceAll(v, "€", "")
+	v = strings.ReplaceAll(v, "£", "")
+	v = strings.ReplaceAll(v, "تومان", "")
+	v = strings.ReplaceAll(v, "ریال", "")
+	v = strings.TrimSpace(v)
 
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
-		if matches := re.FindStringSubmatch(json); len(matches) > 1 {
-			return matches[1]
-		}
-	}
-	return ""
-}
+	r := regexp.MustCompile(`[\d.]+`)
+	n := r.FindString(v)
 
-func extractNestedJSONValue(json, parent, key string) string {
-	// Simple nested extraction
-	pattern := `"` + parent + `"\s*:\s*\{[^}]*"` + key + `"\s*:\s*"([^"]*)"`
-	re := regexp.MustCompile(pattern)
-	if matches := re.FindStringSubmatch(json); len(matches) > 1 {
-		return matches[1]
-	}
-	return ""
-}
-
-func parsePrice(s string) float64 {
-	// Remove currency symbols and text
-	s = strings.TrimSpace(s)
-
-	// Remove common currency symbols
-	currencySymbols := []string{"$", "€", "£", "¥", "₹", "﷼", "تومان", "ریال", "IRR", "USD", "EUR", "GBP"}
-	for _, sym := range currencySymbols {
-		s = strings.ReplaceAll(s, sym, "")
-	}
-
-	// Remove spaces and commas (but keep Persian/Arabic digits)
-	s = strings.ReplaceAll(s, " ", "")
-	s = strings.ReplaceAll(s, ",", "")
-	s = strings.ReplaceAll(s, "٬", "") // Persian thousands separator
-
-	// Convert Persian digits to ASCII
-	persianDigits := map[rune]rune{
-		'۰': '0', '۱': '1', '۲': '2', '۳': '3', '۴': '4',
-		'۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9',
-	}
-	var converted strings.Builder
-	for _, r := range s {
-		if ascii, ok := persianDigits[r]; ok {
-			converted.WriteRune(ascii)
-		} else {
-			converted.WriteRune(r)
-		}
-	}
-	s = converted.String()
-
-	// Extract number
-	re := regexp.MustCompile(`[\d.]+`)
-	matches := re.FindString(s)
-	if matches == "" {
+	if n == "" {
 		return 0
 	}
 
-	price, _ := strconv.ParseFloat(matches, 64)
-	return price
-}
-
-func isInStock(availability string) bool {
-	availability = strings.ToLower(availability)
-	inStockIndicators := []string{
-		"instock",
-		"in_stock",
-		"in stock",
-		"available",
-		"موجود",
-		"https://schema.org/instock",
-	}
-	for _, indicator := range inStockIndicators {
-		if strings.Contains(availability, indicator) {
-			return true
-		}
-	}
-	return false
-}
-
-func getImageSrc(s *goquery.Selection) string {
-	// Try various image source attributes
-	attrs := []string{"src", "data-src", "data-lazy-src", "data-original", "srcset"}
-	for _, attr := range attrs {
-		if src, exists := s.Attr(attr); exists && src != "" {
-			// For srcset, get the first URL
-			if attr == "srcset" {
-				parts := strings.Split(src, ",")
-				if len(parts) > 0 {
-					src = strings.Fields(parts[0])[0]
-				}
-			}
-			return strings.TrimSpace(src)
-		}
-	}
-	return ""
+	val, _ := strconv.ParseFloat(n, 64)
+	return val
 }
