@@ -11,6 +11,7 @@ import (
 
 	"spiderly/internal/chunker"
 	"spiderly/internal/crawler"
+	"spiderly/internal/exclude"
 	"spiderly/internal/models"
 	"spiderly/internal/sitemap"
 )
@@ -80,13 +81,14 @@ type CoreConfig struct {
 	MaxWorkers     int
 	ProductPattern string // Raw pattern string (legacy/backward compat)
 
-	// Product mode settings
-	ProductMode            bool           // Enable product extraction
-	ProductSitemaps        []string       // Filter to specific sitemap types (e.g., ["pdp"])
-	ExtractSpecs           bool           // Extract product specifications
-	ExtractImages          bool           // Extract all product images
-	ExcludePatterns        []string       // Regexp patterns to drop non-product URLs
-	CompiledProductPattern *regexp.Regexp // Pre-compiled product URL pattern
+    // Product mode settings
+    ProductMode            bool             // Enable product extraction
+    ProductSitemaps        []string         // Filter to specific sitemap types (e.g., ["pdp"])
+    ExtractSpecs           bool             // Extract product specifications
+    ExtractImages          bool             // Extract all product images
+    ExcludePatterns        []string         // Regexp patterns to drop non-product URLs
+    CompiledExcludePatterns []*regexp.Regexp // Pre-compiled exclude regexes
+    CompiledProductPattern *regexp.Regexp   // Pre-compiled product URL pattern
 }
 
 
@@ -213,6 +215,10 @@ func (c *Core) ApplyConfig(cfg CoreConfig) {
 	}
 	if len(cfg.ExcludePatterns) > 0 {
 		c.config.ExcludePatterns = cfg.ExcludePatterns
+		// compile exclude patterns once
+		if res, err := exclude.CompilePatterns(cfg.ExcludePatterns); err == nil {
+			c.config.CompiledExcludePatterns = res
+		}
 	}
 	if cfg.CompiledProductPattern != nil {
 		c.config.CompiledProductPattern = cfg.CompiledProductPattern
@@ -1103,40 +1109,17 @@ func (c *Core) filterProductEntries(entries []models.SitemapEntry) []models.Site
 		return entries
 	}
 
-	// Compile exclude patterns from config
-	var excludeRegexes []*regexp.Regexp
-	for _, pattern := range c.config.ExcludePatterns {
-		if re, err := regexp.Compile(pattern); err == nil {
-			excludeRegexes = append(excludeRegexes, re)
-		} else {
-			c.logger.Warning("Invalid exclude pattern '%s': %v", pattern, err)
-		}
-	}
-
-	// Default exclusions if none provided
-	if len(excludeRegexes) == 0 {
-		defaultExcludes := []string{
-			`/blog(/|$)`,
-			`/news(/|$)`,
-			`/support(/|$)`,
-			`/help(/|$)`,
-			`/category(/|$)`,
-			`/image(/|$)`,
-			`/about-us(/|$)`,
-			`/contactus(/|$)`,
-			`/topic(/|$)`,
-			`/cart(/|$)`,
-			`/checkout(/|$)`,
-			`/account(/|$)`,
-			`/login(/|$)`,
-			`/register(/|$)`,
-		}
-		for _, pattern := range defaultExcludes {
-			if re, err := regexp.Compile(pattern); err == nil {
-				excludeRegexes = append(excludeRegexes, re)
-			}
-		}
-	}
+   // Determine which exclude regexes to use (configured or default)
+   var excludeRegexes []*regexp.Regexp
+   if len(c.config.CompiledExcludePatterns) > 0 {
+       excludeRegexes = c.config.CompiledExcludePatterns
+   } else {
+       if res, err := exclude.CompilePatterns(exclude.DefaultPatterns); err == nil {
+           excludeRegexes = res
+       } else {
+           c.logger.Warning("exclude patterns compile error: %v", err)
+       }
+   }
 
 	var filtered []models.SitemapEntry
 

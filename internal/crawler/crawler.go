@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 	"spiderly/internal/extractor"
+	"spiderly/internal/exclude"
 	"spiderly/internal/models"
 
 	"github.com/gocolly/colly/v2"
@@ -37,6 +37,8 @@ type Config struct {
 	ProductPattern *regexp.Regexp
 	ExtractSpecs   bool
 	ExtractImages  bool
+	ExcludePatterns []string
+	CompiledExcludePatterns []*regexp.Regexp
 }
 
 // DefaultConfig returns sensible defaults
@@ -85,6 +87,12 @@ type Crawler struct {
 func NewCrawler(cfg Config) *Crawler {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Precompile exclude patterns if provided
+	if len(cfg.ExcludePatterns) > 0 && len(cfg.CompiledExcludePatterns) == 0 {
+		if res, err := exclude.CompilePatterns(cfg.ExcludePatterns); err == nil {
+			cfg.CompiledExcludePatterns = res
+		}
+	}
 	return &Crawler{
 		config:  cfg,
 		results: make([]models.ScrapedPage, 0),

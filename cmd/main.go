@@ -13,7 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"spiderly/internal/core"
+   "spiderly/internal/core"
+   "spiderly/internal/exclude"
 )
 
 func main() {
@@ -47,8 +48,16 @@ func main() {
 	minPriority := flag.Float64("min-priority", 0, "Minimum sitemap priority to include (0.0 - 1.0)")
 	urlPattern := flag.String("url-pattern", "", "Regex pattern to filter sitemap URLs")
 	productPattern := flag.String("product-pattern", "", "Regex to identify product pages")
+	excludePatterns := flag.String("exclude", "", "Comma-separated regex patterns to skip URLs")
 
 	flag.Parse()
+	// Build exclude list: custom patterns or default fence when product mode enabled
+	var excludes []string
+	if t := strings.TrimSpace(*excludePatterns); t != "" {
+		excludes = strings.Split(t, ",")
+	} else if *productMode {
+		excludes = exclude.DefaultPatterns
+	}
 
 	setFlags := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) {
@@ -135,6 +144,7 @@ func main() {
 		MaxWorkers:     *workers,
 		ProductMode:    *productMode,
 		CompiledProductPattern: compiledProductPattern, // pre-compiled *regexp.Regexp for hot path
+		ExcludePatterns:        excludes,
 	}
 
 	e := core.NewCore(cfg)

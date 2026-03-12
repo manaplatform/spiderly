@@ -8,15 +8,18 @@ Spiderly is a fast, flexible command-line web crawler designed for deep site exp
 
 ## ✨ Features
 
-- **Deep recursive crawling** — explore entire websites with configurable depth and page limits
-- **Sitemap-aware discovery** — automatically parses XML sitemaps; skip with `-recursive` for pure link-following
-- **Parallel chunked processing** — split URL lists into chunks and process them across multiple concurrent workers for maximum throughput
-- **JSON export** — save structured crawl results to a JSON file for programmatic consumption
-- **Markdown export** — generate polished Markdown crawl reports with statistics, status code breakdowns, and per-page details
-- **Configurable concurrency** — fine-tune concurrent requests per worker, request timeouts, and inter-request delays
-- **Rich console output** — colorized, emoji-enhanced terminal summaries with real-time progress; disable colors with `--no-color`
-- **Verbose logging** — toggle detailed request-level logging for debugging
-- **Headless browser support** — built-in ChromeDP integration for JavaScript-rendered pages
+### Crawling & discovery
+- Guide Spiderly with sitemap seeds or recursive link-following while tuning depth, timeout, and delay to suit each target URL. Optional priority and URL filters plus the `-recursive` override help you balance auto-discovery with deep traversal. [`cmd/main.go:23-52`]
+
+### Parallel chunked processing
+- Chunked mode splits the crawl into batches so multiple workers (`-chunk-size`, `-workers`) can fetch pages concurrently while respecting per-worker concurrency, delays, and timeouts. [`cmd/main.go:36-85`]
+
+### Product intelligence
+- Enable `-product-mode` (or provide `-product-pattern`) to focus on ecommerce listings. Product mode auto-promotes chunked processing, raises the default page/chunk/worker counts, and lets you customize the regex that identifies product URLs. [`cmd/main.go:43-118`]
+- Markdown reports surface product summaries, price distributions, stock counts, and per-product metadata whenever product data is available, while JSON output and the console summary keep crawl stats, status codes, and keyword insights organized for automation. [`cmd/main.go:269-405`][`cmd/main.go:500-580`]
+
+### Output & observability
+- Save indented JSON or illustrated Markdown reports, and rely on Spiderly's summary box, verbose logging, and ANSI-safe mode to understand throughput, HTTP statuses, and any errors that arise during the run. [`cmd/main.go:269-365`][`cmd/main.go:539-670`]
 
 ---
 
@@ -56,23 +59,27 @@ spiderly -url <target> [options]
 
 ### CLI Flags
 
-| Flag | Default | Description |
-|---|---|---|
-| `-url` | *(required)* | Target URL to crawl |
-| `-pages` | `100` | Maximum number of pages to scrape |
-| `-depth` | `10` | Maximum crawl depth |
-| `-concurrency` | `5` | Concurrent requests per worker |
-| `-timeout` | `30s` | Request timeout (Go duration, e.g. `10s`, `1m`) |
-| `-delay` | `200ms` | Delay between requests (Go duration) |
-| `-chunked` | `false` | Enable parallel chunked processing |
-| `-chunk-size` | `50` | Number of URLs per chunk |
-| `-workers` | `4` | Number of parallel chunk workers |
-| `-output` | — | File path for JSON output |
-| `-markdown` | — | File path for Markdown report output |
-| `-recursive` | `false` | Force recursive crawl (skip sitemap discovery) |
-| `-verbose` | `false` | Enable verbose / debug logging |
-| `-no-color` | `false` | Disable colored terminal output |
-
+| Flag                 | Default       | Description                                                              |
+|---                   |---            |---                                                                        |
+| `-url`               | *(required)*  | Target URL to crawl                                                       |
+| `-pages`             | `100`         | Maximum number of pages to scrape                                         |
+| `-depth`             | `10`          | Maximum crawl depth                                                       |
+| `-concurrency`       | `5`           | Concurrent requests per worker                                            |
+| `-timeout`           | `30s`         | Request timeout (Go duration, e.g. `10s`, `1m`)                           |
+| `-delay`             | `200ms`       | Delay between requests (Go duration)                                      |
+| `-chunked`           | `false`       | Enable parallel chunked processing                                        |
+| `-chunk-size`        | `50`          | Number of URLs per chunk                                                  |
+| `-workers`           | `4`           | Number of parallel chunk workers                                          |
+| `-sitemap`           | —             | Direct sitemap URL (skip auto-discovery)                                  |
+| `-min-priority`      | `0`           | Minimum sitemap priority filter (0.0 - 1.0)                               |
+| `-url-pattern`       | —             | Regex to filter sitemap URLs                                              |
+| `-product-mode`      | `false`       | Enable product-only crawl mode (auto-enables chunked)                     |
+| `-product-pattern`   | —             | Custom regex for product URLs                                             |
+| `-output`            | —             | File path for JSON output                                                 |
+| `-markdown`          | —             | File path for Markdown report output                                      |
+| `-recursive`         | `false`       | Force recursive crawl (skip sitemap discovery)                            |
+| `-verbose`           | `false`       | Enable verbose / debug logging                                            |
+| `-no-color`          | `false`       | Disable colored terminal output                                           |
 ### Examples
 
 **Basic crawl with defaults:**
@@ -138,36 +145,33 @@ spiderly -url https://example.com -recursive -depth 5 -timeout 15s -concurrency 
 
 ## ⚙️ Configuration
 
-### Chunked Processing
+### Product mode & URL filters
+When `-product-mode` is enabled (or a custom `-product-pattern` is provided), Spiderly auto-enables chunked processing, increases default page, chunk, and worker counts, and uses a regex to identify product pages. You can also supply a direct sitemap (`-sitemap`), filter by minimum priority (`-min-priority`), or apply a URL filter (`-url-pattern`), or force recursive link-following with `-recursive`. [`cmd/main.go:44-51`][`cmd/main.go:68-96`]
 
-When `-chunked` is enabled, Spiderly divides the discovered URL list into batches of `-chunk-size` URLs and processes them across `-workers` parallel workers. Each worker maintains its own Colly collector with the configured `-concurrency`, `-delay`, and `-timeout` values. This dramatically speeds up large crawls while keeping per-worker resource usage predictable.
+```bash
+# Crawl products from sitemap with custom pattern and save JSON
+spiderly -url https://example.com -product-mode -product-pattern "/product/" -output products.json
+```
+
+### Chunked processing
+Split large crawls into batches of `-chunk-size` URLs processed concurrently across `-workers`. Each chunk worker still respects `-concurrency`, `-delay`, and `-timeout` to maintain throughput and politeness. [`cmd/main.go:36-85`]
 
 ```bash
 # Process 1000 pages in chunks of 200 across 5 workers
 spiderly -url https://example.com -pages 1000 -chunked -chunk-size 200 -workers 5
 ```
 
-### Recursive Mode
+### Output formats & logging
+Use `-output` for JSON export or `-markdown` for a rich Markdown report. Both can be combined. [`cmd/main.go:269-365`]
 
-By default Spiderly attempts to discover pages via the target site's XML sitemap. Pass `-recursive` to skip sitemap discovery entirely and instead follow links found on each page up to `-depth` levels deep.
+| Format     | Flag                | Description                                                               |
+|---         |---                  |---                                                                         |
+| **JSON**   | `-output results.json`   | Pretty-printed JSON array of scraped pages.                              |
+| **Markdown**| `-markdown report.md`  | Human-readable Markdown report with stats, tables, and per-page details.  |
 
-```bash
-spiderly -url https://example.com -recursive -depth 3
-```
-
-### Output Formats
-
-| Format | Flag | Description |
-|---|---|---|
-| **JSON** | `-output results.json` | Pretty-printed JSON array of all scraped pages, including URL, title, meta tags, content length, load time, status code, and depth. |
-| **Markdown** | `-markdown report.md` | Human-readable crawl report with summary statistics, HTTP status code distribution, keyword frequency, and per-page details. |
-
-Both flags can be used together in a single run.
-
-### Verbosity & Colors
-
-- `-verbose` turns on detailed per-request logging so you can see every URL as it is fetched and any errors encountered.
-- `-no-color` strips ANSI escape codes from all terminal output, useful when piping to a file or running in CI environments.
+### Verbosity & colors
+- `-verbose` prints detailed per-request logs.
+- `-no-color` removes ANSI colors for compatibility with text outputs. [`cmd/main.go:31-33`]
 
 ---
 
