@@ -12,7 +12,7 @@ import (
 	"spiderly/internal/extractor"
 	"spiderly/internal/exclude"
 	"spiderly/internal/models"
-
+	"log"
 	"github.com/gocolly/colly/v2"
 )
 
@@ -299,14 +299,26 @@ func (c *Crawler) handlePage(e *colly.HTMLElement) {
 
 	// Conditionally extract product data
 	if c.shouldExtractProduct(pageURL) {
+		// DEBUG: Log that extraction is starting for this specific URL
+		log.Printf("[DEBUG] Starting product extraction for URL: %s", pageURL)
+
 		opts := extractor.ProductOptions{
 			ExtractSpecs:  c.config.ExtractSpecs,
 			ExtractImages: c.config.ExtractImages,
 		}
 		product := extractor.ExtractProduct(e.DOM, pageURL, opts)
+		
 		if product != nil && product.Name != "" {
+			// DEBUG: Log a successful extraction and print the product name
+			log.Printf("[DEBUG] Successfully extracted product: '%s' from URL: %s", product.Name, pageURL)
 			page.Product = product
+		} else {
+			// DEBUG: Log if the extraction returned nil or an empty product name
+			log.Printf("[DEBUG] Extraction failed or product name was empty for URL: %s", pageURL)
 		}
+	} else {
+		// DEBUG (Optional): Log when a page is skipped based on your rules
+		log.Printf("[DEBUG] Skipping product extraction (condition not met) for URL: %s", pageURL)
 	}
 
 	// Store result
@@ -392,19 +404,25 @@ func (c *Crawler) handleError(r *colly.Response, err error) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (c *Crawler) shouldExtractProduct(pageURL string) bool {
-	// If product mode is disabled, don't extract
-	if !c.config.ProductMode {
-		return false
-	}
+	log.Printf("[shouldExtractProduct] Evaluating URL: %s", pageURL)
 
-	// If no pattern specified, extract from all pages in product mode
-	if c.config.ProductPattern == nil {
+	if !c.config.ProductMode {
+		log.Printf("[shouldExtractProduct] Result: false | Reason: ProductMode is disabled | URL: %s", pageURL)
+		return false
+	} else if c.config.ProductPattern != nil {
+		isMatch := c.config.ProductPattern.MatchString(pageURL)
+		if isMatch {
+			log.Printf("[shouldExtractProduct] Result: true | Reason: URL matches ProductPattern | URL: %s", pageURL)
+		} else {
+			log.Printf("[shouldExtractProduct] Result: false | Reason: URL does NOT match ProductPattern | URL: %s", pageURL)
+		}
+		return isMatch
+	} else {
+		log.Printf("[shouldExtractProduct] Result: true | Reason: ProductMode is enabled but no ProductPattern is specified | URL: %s", pageURL)
 		return true
 	}
-
-	// Check if URL matches the product pattern
-	return c.config.ProductPattern.MatchString(pageURL)
 }
+
 // OnLinkDiscovered sets callback for when a new link is found
 func (c *Crawler) OnLinkDiscovered(fn func(from, to string)) {
 	c.onLinkDiscovered = fn

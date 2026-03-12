@@ -76,9 +76,6 @@ func main() {
 	//  Product Mode: Auto-enable chunked
 	// ─────────────────────────────────────────
 	if *productMode {
-		if *productPattern == "" {
-			*productPattern = "/product|/p/|/item/|/prd/|/goods/"
-		}
 		if !*chunked {
 			*chunked = true
 		}
@@ -102,7 +99,10 @@ func main() {
 	//  • When no pattern string is set the compiled regex stays nil; downstream
 	//    code treats nil as "extract from every page in product mode".
 	// ─────────────────────────────────────────
-	var compiledProductPattern *regexp.Regexp
+	// ─────────────────────────────────────────
+	//  Compile product-pattern regex (Step 1)
+	// ─────────────────────────────────────────
+	var compiledProductPattern *regexp.Regexp 
 
 	if *productPattern != "" {
 		// A pattern without product-mode is almost certainly a user mistake —
@@ -122,6 +122,8 @@ func main() {
 			log.Printf("[INFO] Product pattern compiled: %s", *productPattern)
 		}
 	}
+	// No 'else' block needed! If *productPattern is empty, compiledProductPattern remains nil.
+
 
 	// ─────────────────────────────────────────
 	//  Build CoreConfig

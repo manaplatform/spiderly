@@ -357,6 +357,7 @@ func (c *Chunker) processChunk(workerID int, chunk Chunk) WorkerResult {
 		Timeout:     c.config.Timeout,
 		Headless:    c.config.Headless,
 		SitemapMode: true,
+		ProductMode: c.config.ProductMode,
 	}
 	
 	crwl := crawler.NewCrawler(crawlerCfg)
