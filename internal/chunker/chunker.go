@@ -42,21 +42,29 @@ const (
 // ─────────────────────────────────────────────
 
 // Config holds chunker configuration
+// Config holds chunker configuration
 type Config struct {
 	// Chunking settings
-	ChunkSize   int // URLs per chunk (default: 50)
-	MaxWorkers  int // Max parallel workers/processes (default: 4)
-	
+	ChunkSize  int // URLs per chunk (default: 50)
+	MaxWorkers int // Max parallel workers/processes (default: 4)
+
 	// Crawler settings (applied to each worker)
 	Concurrency int           // Concurrent requests per worker
 	Delay       time.Duration // Delay between requests
 	Timeout     time.Duration // Request timeout
 	Headless    bool          // Use headless browser
-	
+
+	// Product extraction settings
+	ProductMode    bool   // Enable product extraction mode
+	ProductPattern string // URL pattern to identify product pages
+	ExtractSpecs   bool   // Extract product specifications
+	ExtractImages  bool   // Extract product images
+
 	// UI settings
 	Verbose bool
 	NoColor bool
 }
+
 
 // DefaultConfig returns sensible defaults
 func DefaultConfig() Config {

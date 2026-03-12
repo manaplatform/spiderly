@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"math"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -48,6 +50,11 @@ func main() {
 
 	flag.Parse()
 
+	setFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		setFlags[f.Name] = true
+	})
+
 	// ─────────────────────────────────────────
 	//  Validate Required Flags
 	// ─────────────────────────────────────────
@@ -66,15 +73,44 @@ func main() {
 		if !*chunked {
 			*chunked = true
 		}
-		if *maxPages == 100 {
-			// Raise default for product mode – users usually want everything
+		if !setFlags["pages"] {
 			*maxPages = 100000
 		}
-		if *chunkSize == 50 {
+		if !setFlags["chunk-size"] {
 			*chunkSize = 200
 		}
-		if *workers == 4 {
+		if !setFlags["workers"] {
 			*workers = 8
+		}
+	}
+
+	// ─────────────────────────────────────────
+	//  Compile product-pattern regex (Step 1)
+	// ─────────────────────────────────────────
+	//  • If -product-pattern is given without -product-mode, auto-enable product
+	//    mode (providing a pattern implies the intent).
+	//  • Invalid regex → immediate exit with a clear message.
+	//  • When no pattern string is set the compiled regex stays nil; downstream
+	//    code treats nil as "extract from every page in product mode".
+	// ─────────────────────────────────────────
+	var compiledProductPattern *regexp.Regexp
+
+	if *productPattern != "" {
+		// A pattern without product-mode is almost certainly a user mistake —
+		// be helpful and turn it on automatically.
+		if !*productMode {
+			log.Println("[WARN] -product-pattern provided without -product-mode; enabling product mode automatically")
+			*productMode = true
+		}
+
+		var err error
+		compiledProductPattern, err = regexp.Compile(*productPattern)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: invalid -product-pattern regex %q: %v\n", *productPattern, err)
+			os.Exit(1)
+		}
+		if *verbose {
+			log.Printf("[INFO] Product pattern compiled: %s", *productPattern)
 		}
 	}
 
@@ -98,8 +134,7 @@ func main() {
 		ChunkSize:      *chunkSize,
 		MaxWorkers:     *workers,
 		ProductMode:    *productMode,
-		ProductPattern: *productPattern,
-
+		CompiledProductPattern: compiledProductPattern, // pre-compiled *regexp.Regexp for hot path
 	}
 
 	e := core.NewCore(cfg)
@@ -115,6 +150,26 @@ func main() {
 
 	// Convert internal models → exported structs
 	exported := core.ToScrapedPageResults(results)
+
+	// ─────────────────────────────────────────
+	//  Product-mode notice when no products found
+	// ─────────────────────────────────────────
+	if *productMode {
+		hasProduct := false
+		for _, p := range exported {
+			if p.Product != nil {
+				hasProduct = true
+				break
+			}
+		}
+		if !hasProduct {
+			log.Println("[NOTICE] Product mode was enabled but no product data was extracted.")
+			log.Println("         Tip: check that -product-pattern matches your target site's product URLs.")
+			if *productPattern != "" {
+				log.Printf("         Current pattern: %s", *productPattern)
+			}
+		}
+	}
 
 	// ─────────────────────────────────────────
 	//  Console Summary (always printed)
@@ -279,7 +334,7 @@ func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error 
 			maxDepth = p.Depth
 		}
 
-		// Collect product stats
+		// Collect product stats — only when Product is actually populated
 		if p.Product != nil {
 			productPages = append(productPages, p)
 
@@ -294,7 +349,6 @@ func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error 
 					maxPrice = p.Product.Price
 				}
 
-				// Price range buckets (assuming IRR or similar large currency)
 				categorizePrice(p.Product.Price, priceRanges)
 			}
 
@@ -325,12 +379,11 @@ func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error 
 	}
 	sb.WriteString("\n")
 
-	// ── Product Summary (if products found) ─
+	// ── Product Summary — ONLY when real product data exists ──
 	if len(productPages) > 0 {
 		sb.WriteString("---\n\n")
 		sb.WriteString("## 🛒 Product Summary\n\n")
 
-		// Determine primary currency
 		primaryCurrency := getPrimaryCurrency(currencyFreq)
 
 		sb.WriteString("| Metric | Value |\n|---|---|\n")
@@ -393,7 +446,6 @@ func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error 
 		sb.WriteString("| # | Product | Brand | Price | Stock | Rating |\n")
 		sb.WriteString("|---|---|---|---|---|---|\n")
 
-		// Sort products by price (highest first)
 		sortedProducts := sortProductsByPrice(productPages)
 
 		for i, p := range sortedProducts {
@@ -526,7 +578,7 @@ func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error 
 		}
 		sb.WriteString("\n")
 
-		// ── Product Details Section ─────────
+		// ── Product Details Section — only when populated ──
 		if p.Product != nil {
 			sb.WriteString("#### 🛍️ Product Information\n\n")
 			sb.WriteString("| Field | Value |\n|---|---|\n")
@@ -547,7 +599,6 @@ func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error 
 				sb.WriteString(fmt.Sprintf("| 🔢 MPN | `%s` |\n", p.Product.MPN))
 			}
 
-			// Price section with highlighting
 			if p.Product.Price > 0 {
 				priceDisplay := formatPrice(p.Product.Price, p.Product.Currency)
 				sb.WriteString(fmt.Sprintf("| 💰 **Price** | **%s** |\n", priceDisplay))
@@ -561,7 +612,6 @@ func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error 
 				}
 			}
 
-			// Stock status
 			stockDisplay := "❌ Out of Stock"
 			if p.Product.InStock {
 				stockDisplay = "✅ In Stock"
@@ -571,7 +621,6 @@ func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error 
 			}
 			sb.WriteString(fmt.Sprintf("| 📦 Stock | %s |\n", stockDisplay))
 
-			// Rating
 			if p.Product.Rating > 0 {
 				stars := strings.Repeat("⭐", int(p.Product.Rating))
 				ratingText := fmt.Sprintf("%s %.1f/5", stars, p.Product.Rating)
@@ -581,7 +630,6 @@ func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error 
 				sb.WriteString(fmt.Sprintf("| ⭐ Rating | %s |\n", ratingText))
 			}
 
-			// Category
 			if p.Product.Category != "" {
 				sb.WriteString(fmt.Sprintf("| 📁 Category | %s |\n", escapeMDTableCell(p.Product.Category)))
 			} else if len(p.Product.Categories) > 0 {
@@ -590,18 +638,16 @@ func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error 
 
 			sb.WriteString("\n")
 
-			// Product Description
 			if p.Product.Description != "" {
 				sb.WriteString("**Product Description:**\n\n")
 				desc := truncate(p.Product.Description, 500)
 				sb.WriteString(fmt.Sprintf("> %s\n\n", escapeMDTableCell(desc)))
 			}
 
-			// Product Images
 			if len(p.Product.Images) > 0 {
 				sb.WriteString("**Product Images:**\n\n")
 				for j, img := range p.Product.Images {
-					if j >= 5 { // Limit to 5 images
+					if j >= 5 {
 						sb.WriteString(fmt.Sprintf("- ... and %d more images\n", len(p.Product.Images)-5))
 						break
 					}
@@ -610,7 +656,6 @@ func saveMarkdown(pages []core.ScrapedPageResult, path, sourceURL string) error 
 				sb.WriteString("\n")
 			}
 
-			// Product Specifications
 			if len(p.Product.Specs) > 0 {
 				sb.WriteString("**Specifications:**\n\n")
 				sb.WriteString("| Spec | Value |\n|---|---|\n")
@@ -697,10 +742,8 @@ func formatPrice(price float64, currency string) string {
 		currency = "IRR"
 	}
 
-	// Format with thousand separators
 	priceStr := formatNumber(price)
 
-	// Currency symbol mapping
 	symbols := map[string]string{
 		"IRR": "﷼",
 		"USD": "$",
@@ -718,7 +761,6 @@ func formatPrice(price float64, currency string) string {
 }
 
 func formatNumber(n float64) string {
-	// Simple thousand separator
 	str := fmt.Sprintf("%.0f", n)
 	result := ""
 	for i, c := range str {
@@ -772,7 +814,7 @@ func sortProductsByPrice(products []core.ScrapedPageResult) []core.ScrapedPageRe
 		if sorted[j].Product != nil {
 			priceJ = sorted[j].Product.Price
 		}
-		return priceI > priceJ // Highest price first
+		return priceI > priceJ
 	})
 
 	return sorted
@@ -800,7 +842,6 @@ func printSummary(pages []core.ScrapedPageResult) {
 		totalLoad += p.LoadTimeMs
 	}
 
-	// Status summary
 	statusKeys := sortedIntKeys(statusCounts)
 	for _, code := range statusKeys {
 		emoji := statusEmoji(code)
@@ -815,7 +856,6 @@ func printSummary(pages []core.ScrapedPageResult) {
 
 	fmt.Println("╠══════════════════════════════════════════════════════════╣")
 
-	// Show first 20 pages
 	limit := 20
 	if len(pages) < limit {
 		limit = len(pages)

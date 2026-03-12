@@ -56,7 +56,6 @@ const (
 // ─────────────────────────────────────────────
 
 // CoreConfig holds all configuration for the crawl core
-// CoreConfig holds all configuration for the crawl core
 type CoreConfig struct {
 	TargetURL  string
 	SitemapURL string
@@ -76,16 +75,18 @@ type CoreConfig struct {
 	NoColor        bool
 
 	// Chunker settings
-	EnableChunker bool
-	ChunkSize     int
-	MaxWorkers    int
-	ProductPattern string
+	EnableChunker  bool
+	ChunkSize      int
+	MaxWorkers     int
+	ProductPattern string // Raw pattern string (legacy/backward compat)
 
 	// Product mode settings
-	ProductMode      bool     // Enable product extraction
-	ProductSitemaps  []string // Filter to specific sitemap types (e.g., ["pdp"])
-	ExtractSpecs     bool     // Extract product specifications
-	ExtractImages    bool     // Extract all product images
+	ProductMode            bool           // Enable product extraction
+	ProductSitemaps        []string       // Filter to specific sitemap types (e.g., ["pdp"])
+	ExtractSpecs           bool           // Extract product specifications
+	ExtractImages          bool           // Extract all product images
+	ExcludePatterns        []string       // Regexp patterns to drop non-product URLs
+	CompiledProductPattern *regexp.Regexp // Pre-compiled product URL pattern
 }
 
 
@@ -192,15 +193,34 @@ func (c *Core) ApplyConfig(cfg CoreConfig) {
 	if cfg.MaxWorkers > 0 {
 		c.config.MaxWorkers = cfg.MaxWorkers
 	}
+	if cfg.ProductPattern != "" {
+		c.config.ProductPattern = cfg.ProductPattern
+	}
 
 	c.config.ForceRecursive = cfg.ForceRecursive
 	c.config.Headless = cfg.Headless
 	c.config.Verbose = cfg.Verbose
 	c.config.NoColor = cfg.NoColor
 	c.config.EnableChunker = cfg.EnableChunker
+
+	// Product mode settings
+	c.config.ProductMode = cfg.ProductMode
+	c.config.ExtractSpecs = cfg.ExtractSpecs
+	c.config.ExtractImages = cfg.ExtractImages
 	
+	if len(cfg.ProductSitemaps) > 0 {
+		c.config.ProductSitemaps = cfg.ProductSitemaps
+	}
+	if len(cfg.ExcludePatterns) > 0 {
+		c.config.ExcludePatterns = cfg.ExcludePatterns
+	}
+	if cfg.CompiledProductPattern != nil {
+		c.config.CompiledProductPattern = cfg.CompiledProductPattern
+	}
+
 	c.logger = NewLogger(c.config.NoColor, c.config.Verbose)
 }
+
 
 // ─────────────────────────────────────────────
 //  Logger - Beautiful Console Output
@@ -627,47 +647,52 @@ func (c *Core) executeChunkedSitemapCrawl(baseURL string, entries []models.Sitem
 	if c.config.MaxPages > 0 && len(entries) > c.config.MaxPages {
 		entries = entries[:c.config.MaxPages]
 	}
-	
-	// Create chunker
+
+	// Create chunker with product settings
 	c.chunker = chunker.New(chunker.Config{
-		ChunkSize:   c.config.ChunkSize,
-		MaxWorkers:  c.config.MaxWorkers,
-		Concurrency: c.config.Concurrency,
-		Delay:       c.config.Delay,
-		Timeout:     c.config.Timeout,
-		Headless:    c.config.Headless,
-		Verbose:     c.config.Verbose,
-		NoColor:     c.config.NoColor,
+		ChunkSize:      c.config.ChunkSize,
+		MaxWorkers:     c.config.MaxWorkers,
+		Concurrency:    c.config.Concurrency,
+		Delay:          c.config.Delay,
+		Timeout:        c.config.Timeout,
+		Headless:       c.config.Headless,
+		Verbose:        c.config.Verbose,
+		NoColor:        c.config.NoColor,
+		ProductMode:    c.config.ProductMode,
+		ProductPattern: c.config.ProductPattern,
+		ExtractSpecs:   c.config.ExtractSpecs,
+		ExtractImages:  c.config.ExtractImages,
 	})
-	
+
 	// Set callbacks
 	c.chunker.OnPageScraped(func(page models.ScrapedPage, chunkID int) {
 		c.mu.Lock()
 		c.stats.PagesScraped++
 		c.mu.Unlock()
 	})
-	
+
 	c.chunker.OnError(func(err chunker.WorkerError) {
 		c.mu.Lock()
 		c.stats.Errors++
 		c.mu.Unlock()
 	})
-	
+
 	// Split into chunks
 	c.chunker.SplitEntries(entries)
-	
+
 	// Process all chunks in parallel
 	results, err := c.chunker.Process(baseURL)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	c.mu.Lock()
 	c.results = results
 	c.mu.Unlock()
-	
+
 	return results, nil
 }
+
 // ─────────────────────────────────────────────
 //  URL Validation
 // ─────────────────────────────────────────────
@@ -751,13 +776,17 @@ func (c *Core) executeSitemapCrawl(baseURL string, entries []models.SitemapEntry
 	}
 
 	c.crawler = crawler.NewCrawler(crawler.Config{
-		MaxPages:    c.config.MaxPages,
-		MaxDepth:    1,
-		Concurrency: c.config.Concurrency,
-		Delay:       c.config.Delay,
-		Timeout:     c.config.Timeout,
-		Headless:    c.config.Headless,
-		SitemapMode: true,
+		MaxPages:       c.config.MaxPages,
+		MaxDepth:       1,
+		Concurrency:    c.config.Concurrency,
+		Delay:          c.config.Delay,
+		Timeout:        c.config.Timeout,
+		Headless:       c.config.Headless,
+		SitemapMode:    true,
+		ProductMode:    c.config.ProductMode,
+		ProductPattern: c.config.CompiledProductPattern,
+		ExtractSpecs:   c.config.ExtractSpecs,
+		ExtractImages:  c.config.ExtractImages,
 	})
 
 	c.setupCrawlerCallbacks()
@@ -780,17 +809,22 @@ func (c *Core) executeSitemapCrawl(baseURL string, entries []models.SitemapEntry
 	return results, nil
 }
 
+
 func (c *Core) executeRecursiveCrawl(targetURL string) ([]models.ScrapedPage, error) {
 	c.logger.Phase("crawling", fmt.Sprintf("Recursive mode from %s", targetURL))
 
 	c.crawler = crawler.NewCrawler(crawler.Config{
-		MaxPages:    c.config.MaxPages,
-		MaxDepth:    c.config.MaxDepth,
-		Concurrency: c.config.Concurrency,
-		Delay:       c.config.Delay,
-		Timeout:     c.config.Timeout,
-		Headless:    c.config.Headless,
-		SitemapMode: false,
+		MaxPages:       c.config.MaxPages,
+		MaxDepth:       c.config.MaxDepth,
+		Concurrency:    c.config.Concurrency,
+		Delay:          c.config.Delay,
+		Timeout:        c.config.Timeout,
+		Headless:       c.config.Headless,
+		SitemapMode:    false,
+		ProductMode:    c.config.ProductMode,
+		ProductPattern: c.config.CompiledProductPattern,
+		ExtractSpecs:   c.config.ExtractSpecs,
+		ExtractImages:  c.config.ExtractImages,
 	})
 
 	c.setupCrawlerCallbacks()
@@ -808,6 +842,7 @@ func (c *Core) executeRecursiveCrawl(targetURL string) ([]models.ScrapedPage, er
 
 	return results, nil
 }
+
 
 // ─────────────────────────────────────────────
 //  Callbacks
@@ -834,8 +869,13 @@ func (c *Core) setupCrawlerCallbacks() {
 		c.logger.PageError(url, err)
 	})
 
-	c.crawler.OnLinkDiscovered(func(link models.DiscoveredLink) {
-		c.logger.LinkDiscovered(link.URL, link.Depth)
+	c.crawler.OnLinkDiscovered(func(from, to string) {
+    link := models.DiscoveredLink{
+        SourceURL: from,
+        URL:       to,
+        Source:    "page",
+    }
+	c.logger.LinkDiscovered(link.URL, link.Depth)
 	})
 }
 
@@ -1056,41 +1096,69 @@ func (c *Core) determineCrawlStrategy(targetURL string) (string, []models.Sitema
 // ─────────────────────────────────────────────
 //  Product Filtering
 // ─────────────────────────────────────────────
-
-// filterProductEntries applies product-mode heuristics to keep only product page URLs.
-// It checks: (1) sitemap type tags, (2) explicit regex pattern, (3) URL heuristics.
+// filterProductEntries keeps only URLs matching the product pattern (if set)
+// and excludes URLs matching any exclude pattern.
 func (c *Core) filterProductEntries(entries []models.SitemapEntry) []models.SitemapEntry {
-	var productURLRegex *regexp.Regexp
-	if c.config.URLPattern != "" {
-		var err error
-		productURLRegex, err = regexp.Compile(c.config.URLPattern)
-		if err != nil {
-			c.logger.Warning("Invalid product URL pattern: %v — using heuristics only", err)
-			productURLRegex = nil
+	if !c.config.ProductMode {
+		return entries
+	}
+
+	// Compile exclude patterns from config
+	var excludeRegexes []*regexp.Regexp
+	for _, pattern := range c.config.ExcludePatterns {
+		if re, err := regexp.Compile(pattern); err == nil {
+			excludeRegexes = append(excludeRegexes, re)
+		} else {
+			c.logger.Warning("Invalid exclude pattern '%s': %v", pattern, err)
+		}
+	}
+
+	// Default exclusions if none provided
+	if len(excludeRegexes) == 0 {
+		defaultExcludes := []string{
+			`/blog(/|$)`,
+			`/news(/|$)`,
+			`/support(/|$)`,
+			`/help(/|$)`,
+			`/category(/|$)`,
+			`/image(/|$)`,
+			`/about-us(/|$)`,
+			`/contactus(/|$)`,
+			`/topic(/|$)`,
+			`/cart(/|$)`,
+			`/checkout(/|$)`,
+			`/account(/|$)`,
+			`/login(/|$)`,
+			`/register(/|$)`,
+		}
+		for _, pattern := range defaultExcludes {
+			if re, err := regexp.Compile(pattern); err == nil {
+				excludeRegexes = append(excludeRegexes, re)
+			}
 		}
 	}
 
 	var filtered []models.SitemapEntry
-	for _, entry := range entries {
-		// 1. If entry type is already tagged as "pdp" or "product", keep it
-		if entry.Type == "pdp" || entry.Type == "product" {
-			filtered = append(filtered, entry)
-			continue
-		}
 
-		// 2. Check against explicit regex pattern
-		if productURLRegex != nil {
-			if productURLRegex.MatchString(entry.URL) {
-				filtered = append(filtered, entry)
-				continue
+EntryLoop:
+	for _, entry := range entries {
+		// Check exclusions first
+		for _, re := range excludeRegexes {
+			if re.MatchString(entry.URL) {
+				c.logger.Verbose("Excluded by pattern: %s", entry.URL)
+				continue EntryLoop
 			}
 		}
 
-		// 3. Fall back to heuristic detection
-		if sitemap.IsLikelyProductURL(entry.URL) {
-			filtered = append(filtered, entry)
-			continue
+		// If product pattern is set, URL must match it
+		if c.config.CompiledProductPattern != nil {
+			if !c.config.CompiledProductPattern.MatchString(entry.URL) {
+				c.logger.Verbose("Doesn't match product pattern: %s", entry.URL)
+				continue EntryLoop
+			}
 		}
+
+		filtered = append(filtered, entry)
 	}
 
 	c.logger.Verbose("Product filter: %d → %d entries", len(entries), len(filtered))

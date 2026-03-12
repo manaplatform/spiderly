@@ -24,7 +24,7 @@ type ScrapedPage struct {
 	LinksCount    int    `json:"links_count"`
 	ImagesCount   int    `json:"images_count"`
 	Depth         int    `json:"depth"`
-
+	Content string       `json:"content,omitempty"`
 	// Product data (when in product mode)
 	Product *ProductInfo `json:"product,omitempty"`
 
@@ -69,3 +69,4 @@ type DiscoveredLink struct {
 	SourceURL  string // The page URL where this link was found
 	AnchorText string // The anchor text of the <a> element
 }
+

@@ -485,17 +485,24 @@ func IsLikelyProductURL(pageURL string) bool {
 func GetSitemapType(sitemapURL string) string {
 	urlLower := strings.ToLower(sitemapURL)
 
+	// WordPress-style compound types: product_cat, product_tag → treat as "product"
+	if strings.Contains(urlLower, "product_cat") || strings.Contains(urlLower, "product_tag") {
+		return "product"
+	}
+
 	types := []string{"pdp", "plp", "product", "category", "static", "landing", "blog", "news", "video", "image"}
 	for _, t := range types {
 		if strings.Contains(urlLower, "-"+t+"-") || strings.Contains(urlLower, "_"+t+"_") ||
 			strings.Contains(urlLower, "/"+t+"-") || strings.Contains(urlLower, "-"+t+".") ||
-			strings.Contains(urlLower, "/"+t+"/") || strings.Contains(urlLower, "_"+t+".") {
+			strings.Contains(urlLower, "/"+t+"/") || strings.Contains(urlLower, "_"+t+".") ||
+			strings.Contains(urlLower, "/"+t+"_") || strings.Contains(urlLower, "-"+t+"_") {
 			return t
 		}
 	}
 
 	return "unknown"
 }
+
 
 // ─────────────────────────────────────────────
 //  Logging

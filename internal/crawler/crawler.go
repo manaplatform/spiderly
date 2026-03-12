@@ -1,8 +1,9 @@
+// internal/crawler/crawler.go
 package crawler
 
 import (
 	"context"
-	"net/http"
+	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
@@ -15,284 +16,388 @@ import (
 	"github.com/gocolly/colly/v2"
 )
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Config holds crawler configuration
 type Config struct {
-	MaxPages       int
-	MaxDepth       int
-	Concurrency    int
-	Delay          time.Duration
-	Timeout        time.Duration
-	Headless       bool
-	SitemapMode    bool
+	MaxPages    int
+	MaxDepth    int
+	Concurrency int
+	Delay       time.Duration
+	Timeout     time.Duration
+	UserAgent   string
+	Headless    bool
+	Verbose     bool
+	SitemapMode bool
+
+	// Product extraction settings
 	ProductMode    bool
 	ProductPattern *regexp.Regexp
+	ExtractSpecs   bool
+	ExtractImages  bool
 }
 
-type Callbacks struct {
-	OnPageScraped    func(models.ScrapedPage)
-	OnError          func(url string, err error)
-	OnLinkDiscovered func(models.DiscoveredLink)
+// DefaultConfig returns sensible defaults
+func DefaultConfig() Config {
+	return Config{
+		MaxPages:    100,
+		MaxDepth:    3,
+		Concurrency: 5,
+		Delay:       200 * time.Millisecond,
+		Timeout:     30 * time.Second,
+		UserAgent:   "Spiderly/1.0",
+		Headless:    false,
+		Verbose:     false,
+		SitemapMode: false,
+	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Crawler Struct
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Crawler handles web scraping operations
 type Crawler struct {
-	config     Config
-	collector  *colly.Collector
-	visited    map[string]bool
-	results    []models.ScrapedPage
-	queue      []queueItem
-	mu         sync.RWMutex
-	callbacks  Callbacks
-	ctx        context.Context
-	cancel     context.CancelFunc
-	httpClient *http.Client
+	config    Config
+	collector *colly.Collector
+	results   []models.ScrapedPage
+	visited   map[string]bool
+	queue     []models.DiscoveredLink
+	mu        sync.Mutex
+	scraped   int // Counter for scraped pages
+	ctx       context.Context
+	cancel    context.CancelFunc
+
+	// Callbacks
+	onPageScraped func(page models.ScrapedPage)
+	onError       func(url string, err error)
+	onLinkFound   func(link models.DiscoveredLink)
+	onLinkDiscovered func(from, to string)
 }
 
-type queueItem struct {
-	URL   string
-	Depth int
-}
+// ─────────────────────────────────────────────────────────────────────────────
+//  Constructor
+// ─────────────────────────────────────────────────────────────────────────────
 
+// NewCrawler creates a new Crawler instance
 func NewCrawler(cfg Config) *Crawler {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	if cfg.Concurrency == 0 {
-		cfg.Concurrency = 5
-	}
-	if cfg.MaxDepth == 0 {
-		cfg.MaxDepth = 3
-	}
-	if cfg.Timeout == 0 {
-		cfg.Timeout = 30 * time.Second
-	}
-
-	c := &Crawler{
+	return &Crawler{
 		config:  cfg,
+		results: make([]models.ScrapedPage, 0),
 		visited: make(map[string]bool),
-		results: []models.ScrapedPage{},
-		queue:   []queueItem{},
+		queue:   make([]models.DiscoveredLink, 0),
 		ctx:     ctx,
 		cancel:  cancel,
-		httpClient: &http.Client{
-			Timeout: cfg.Timeout,
-		},
 	}
-
-	c.setupCollector()
-	return c
 }
 
-func (c *Crawler) setupCollector() {
-	c.collector = colly.NewCollector(
+// ─────────────────────────────────────────────────────────────────────────────
+//  Callback Setters
+// ─────────────────────────────────────────────────────────────────────────────
+
+// OnPageScraped sets callback for each successfully scraped page
+func (c *Crawler) OnPageScraped(fn func(page models.ScrapedPage)) {
+	c.onPageScraped = fn
+}
+
+// OnError sets callback for crawl errors
+func (c *Crawler) OnError(fn func(url string, err error)) {
+	c.onError = fn
+}
+
+// OnLinkFound sets callback for discovered links
+func (c *Crawler) OnLinkFound(fn func(link models.DiscoveredLink)) {
+	c.onLinkFound = fn
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Public Methods
+// ─────────────────────────────────────────────────────────────────────────────
+
+// QueueURL adds a URL to the crawl queue
+func (c *Crawler) QueueURL(rawURL string, depth int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.visited[rawURL] {
+		return
+	}
+
+	c.queue = append(c.queue, models.DiscoveredLink{
+		URL:   rawURL,
+		Depth: depth,
+	})
+}
+
+// Crawl starts the crawling process
+func (c *Crawler) Crawl(startURL string) ([]models.ScrapedPage, error) {
+	// Setup collector with domain restriction based on startURL
+	if err := c.setupCollector(startURL); err != nil {
+		return nil, fmt.Errorf("failed to setup collector: %w", err)
+	}
+
+	// If sitemap mode with queued URLs, visit them directly
+	if c.config.SitemapMode && len(c.queue) > 0 {
+		return c.crawlQueued()
+	}
+
+	// Otherwise do recursive crawl starting from startURL
+	c.QueueURL(startURL, 0)
+	return c.crawlQueued()
+}
+
+// Stop cancels the crawl operation
+func (c *Crawler) Stop() {
+	c.cancel()
+}
+
+// GetResults returns all scraped pages
+func (c *Crawler) GetResults() []models.ScrapedPage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.results
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Internal: Setup
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (c *Crawler) setupCollector(startURL string) error {
+	// Parse start URL to get domain
+	parsedURL, err := url.Parse(startURL)
+	if err != nil {
+		return fmt.Errorf("invalid start URL: %w", err)
+	}
+
+	// Create collector with options
+	opts := []colly.CollectorOption{
 		colly.Async(true),
 		colly.MaxDepth(c.config.MaxDepth),
-	)
+		colly.UserAgent(c.config.UserAgent),
+		colly.AllowedDomains(parsedURL.Host), // Restrict to same domain
+	}
 
-	c.collector.SetRequestTimeout(c.config.Timeout)
+	c.collector = colly.NewCollector(opts...)
 
+	// Set limits
 	c.collector.Limit(&colly.LimitRule{
 		DomainGlob:  "*",
 		Parallelism: c.config.Concurrency,
 		Delay:       c.config.Delay,
 	})
 
-	// Page handler
-	c.collector.OnHTML("html", func(e *colly.HTMLElement) {
-		c.handlePage(e)
-	})
+	c.collector.SetRequestTimeout(c.config.Timeout)
 
-	// Link handler
-	if !c.config.SitemapMode {
-		c.collector.OnHTML("a[href]", func(e *colly.HTMLElement) {
-			c.handleLink(e)
-		})
-	}
+	// Register handlers
+	c.collector.OnHTML("html", c.handlePage)
+	c.collector.OnHTML("a[href]", c.handleLink)
+	c.collector.OnError(c.handleError)
 
-	// Error handler
-	c.collector.OnError(func(r *colly.Response, err error) {
-		if c.callbacks.OnError != nil {
-			c.callbacks.OnError(r.Request.URL.String(), err)
-		}
-	})
+	return nil
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Internal: Crawl Loop
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (c *Crawler) crawlQueued() ([]models.ScrapedPage, error) {
+	for {
+		// Check context cancellation
+		select {
+		case <-c.ctx.Done():
+			c.collector.Wait()
+			return c.results, c.ctx.Err()
+		default:
+		}
+
+		// Get next URL from queue
+		c.mu.Lock()
+		if len(c.queue) == 0 {
+			c.mu.Unlock()
+			break
+		}
+
+		// Check if we've hit max pages
+		if c.config.MaxPages > 0 && c.scraped >= c.config.MaxPages {
+			c.mu.Unlock()
+			break
+		}
+
+		link := c.queue[0]
+		c.queue = c.queue[1:]
+
+		// Skip if already visited
+		if c.visited[link.URL] {
+			c.mu.Unlock()
+			continue
+		}
+
+		c.visited[link.URL] = true
+		c.mu.Unlock()
+
+		// Visit URL
+		if err := c.collector.Visit(link.URL); err != nil {
+			if c.onError != nil {
+				c.onError(link.URL, err)
+			}
+		}
+	}
+
+	c.collector.Wait()
+	return c.results, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Internal: Handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
 func (c *Crawler) handlePage(e *colly.HTMLElement) {
+	// Check context
+	select {
+	case <-c.ctx.Done():
+		return
+	default:
+	}
+
 	pageURL := e.Request.URL.String()
 
-	page := models.ScrapedPage{
-		URL:         pageURL,
-		Title:       strings.TrimSpace(e.ChildText("title")),
-		StatusCode:  e.Response.StatusCode,
-		ContentType: e.Response.Headers.Get("Content-Type"),
-		ScrapedAt:   time.Now(),
-	}
-
-	// -------- PRODUCT DETECTION FIRST --------
-	// Determine if we should attempt product extraction
-	shouldExtract := false
-
-	if c.config.ProductMode {
-		if c.config.ProductPattern == nil {
-			// If no pattern is provided via CLI, attempt extraction on all scraped pages
-			shouldExtract = true
-		} else if c.config.ProductPattern.MatchString(pageURL) {
-			// If a pattern is provided, strictly enforce the regex match
-			shouldExtract = true
-		}
-	}
-
-	if shouldExtract {
-		// e.DOM is the parsed *goquery.Selection for the HTML document
-		productData := extractor.ExtractProduct(e.DOM, pageURL)
-		if productData != nil {
-			page.Product = productData
-		}
-	}
-
-	// -------- META EXTRACTION --------
-	e.ForEach("meta", func(_ int, el *colly.HTMLElement) {
-		name := el.Attr("name")
-		prop := el.Attr("property")
-		content := el.Attr("content")
-
-		switch {
-		case name == "description" || prop == "og:description":
-			if page.Description == "" {
-				page.Description = content
-			}
-		case name == "keywords":
-			page.Keywords = content
-		case name == "author":
-			page.Author = content
-		case prop == "og:image":
-			page.OGImage = content
-		case prop == "article:published_time":
-			page.PublishedDate = content
-		}
-	})
-
-	// -------- BODY & H1 --------
-	page.H1 = strings.TrimSpace(e.ChildText("h1"))
-	page.BodyText = extractBodyText(e)
-
-	// Save
+	// Thread-safe increment and max check
 	c.mu.Lock()
-	if c.config.MaxPages == 0 || len(c.results) < c.config.MaxPages {
-		c.results = append(c.results, page)
+	if c.config.MaxPages > 0 && c.scraped >= c.config.MaxPages {
+		c.mu.Unlock()
+		return
 	}
+	c.scraped++
 	c.mu.Unlock()
 
-	if c.callbacks.OnPageScraped != nil {
-		c.callbacks.OnPageScraped(page)
+	// Build page result
+	page := models.ScrapedPage{
+		URL:        pageURL,
+		Title:      strings.TrimSpace(e.ChildText("title")),
+		StatusCode: e.Response.StatusCode,
+	}
+
+	// Extract content length if available
+	if e.Response != nil {
+		page.ContentLength = int64(len(e.Response.Body))
+	}
+
+	// Extract main content
+	page.Content = extractor.ExtractMainContent(e.DOM)
+
+	// Conditionally extract product data
+	if c.shouldExtractProduct(pageURL) {
+		opts := extractor.ProductOptions{
+			ExtractSpecs:  c.config.ExtractSpecs,
+			ExtractImages: c.config.ExtractImages,
+		}
+		product := extractor.ExtractProduct(e.DOM, pageURL, opts)
+		if product != nil && product.Name != "" {
+			page.Product = product
+		}
+	}
+
+	// Store result
+	c.mu.Lock()
+	c.results = append(c.results, page)
+	c.mu.Unlock()
+
+	// Trigger callback
+	if c.onPageScraped != nil {
+		c.onPageScraped(page)
 	}
 }
 
 func (c *Crawler) handleLink(e *colly.HTMLElement) {
-	href := strings.TrimSpace(e.Attr("href"))
+	// Check context
+	select {
+	case <-c.ctx.Done():
+		return
+	default:
+	}
+
+	// Skip in sitemap mode - we only crawl queued URLs
+	if c.config.SitemapMode {
+		return
+	}
+
+	href := e.Attr("href")
 	if href == "" {
 		return
 	}
 
-	abs := e.Request.AbsoluteURL(href)
-	if abs == "" {
+	// Resolve relative URLs
+	absoluteURL := e.Request.AbsoluteURL(href)
+	if absoluteURL == "" {
 		return
 	}
 
-	u, err := url.Parse(abs)
-	if err != nil {
+	// Skip non-http(s) URLs
+	if !strings.HasPrefix(absoluteURL, "http://") && !strings.HasPrefix(absoluteURL, "https://") {
 		return
 	}
 
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return
+	// Clean URL (remove fragments)
+	if idx := strings.Index(absoluteURL, "#"); idx != -1 {
+		absoluteURL = absoluteURL[:idx]
 	}
 
-	u.Fragment = ""
-	cleanURL := u.String()
+	// Calculate depth
+	currentDepth := e.Request.Depth
 
 	c.mu.Lock()
-	if c.visited[cleanURL] {
-		c.mu.Unlock()
-		return
+	alreadyVisited := c.visited[absoluteURL]
+	if !alreadyVisited && (c.config.MaxDepth == 0 || currentDepth < c.config.MaxDepth) {
+		c.queue = append(c.queue, models.DiscoveredLink{
+			URL:   absoluteURL,
+			Depth: currentDepth + 1,
+		})
 	}
-	c.visited[cleanURL] = true
 	c.mu.Unlock()
 
-	if c.callbacks.OnLinkDiscovered != nil {
-		c.callbacks.OnLinkDiscovered(models.DiscoveredLink{
-			URL:        cleanURL,
-			SourceURL:  e.Request.URL.String(),
-			Depth:      e.Request.Depth + 1,
-			AnchorText: strings.TrimSpace(e.Text),
+	// Trigger callback
+	if c.onLinkFound != nil && !alreadyVisited {
+		c.onLinkFound(models.DiscoveredLink{
+			URL:   absoluteURL,
+			Depth: currentDepth + 1,
 		})
 	}
 
-	_ = e.Request.Visit(cleanURL)
-}
-
-func extractBodyText(e *colly.HTMLElement) string {
-	var out []string
-
-	e.ForEach("article, main, .content, .post, .entry, p", func(_ int, el *colly.HTMLElement) {
-		t := strings.TrimSpace(el.Text)
-		if len(t) > 20 {
-			out = append(out, t)
-		}
-	})
-
-	joined := strings.Join(out, " ")
-
-	if len(joined) > 5000 {
-		joined = joined[:5000]
-	}
-
-	return joined
-}
-
-func (c *Crawler) QueueURL(u string, depth int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.visited[u] {
-		c.visited[u] = true
-		c.queue = append(c.queue, queueItem{URL: u, Depth: depth})
+	// Visit the link directly for recursive crawling
+	if !alreadyVisited {
+		e.Request.Visit(absoluteURL)
 	}
 }
 
-func (c *Crawler) Crawl(startURL string) ([]models.ScrapedPage, error) {
-	c.mu.Lock()
-	c.visited[startURL] = true
-	c.mu.Unlock()
+func (c *Crawler) handleError(r *colly.Response, err error) {
+	if c.onError != nil {
+		c.onError(r.Request.URL.String(), err)
+	}
+}
 
-	if len(c.queue) > 0 {
-		for _, it := range c.queue {
-			if c.ctx.Err() != nil {
-				break
-			}
-			c.collector.Visit(it.URL)
-		}
-	} else {
-		c.collector.Visit(startURL)
+// ─────────────────────────────────────────────────────────────────────────────
+//  Internal: Product Detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (c *Crawler) shouldExtractProduct(pageURL string) bool {
+	// If product mode is disabled, don't extract
+	if !c.config.ProductMode {
+		return false
 	}
 
-	c.collector.Wait()
+	// If no pattern specified, extract from all pages in product mode
+	if c.config.ProductPattern == nil {
+		return true
+	}
 
-	c.mu.RLock()
-	out := make([]models.ScrapedPage, len(c.results))
-	copy(out, c.results)
-	c.mu.RUnlock()
-
-	return out, nil
+	// Check if URL matches the product pattern
+	return c.config.ProductPattern.MatchString(pageURL)
 }
-
-func (c *Crawler) Stop() { c.cancel() }
-
-func (c *Crawler) OnPageScraped(fn func(models.ScrapedPage)) {
-	c.callbacks.OnPageScraped = fn
-}
-
-func (c *Crawler) OnError(fn func(string, error)) {
-	c.callbacks.OnError = fn
-}
-
-func (c *Crawler) OnLinkDiscovered(fn func(models.DiscoveredLink)) {
-	c.callbacks.OnLinkDiscovered = fn
+// OnLinkDiscovered sets callback for when a new link is found
+func (c *Crawler) OnLinkDiscovered(fn func(from, to string)) {
+	c.onLinkDiscovered = fn
 }
