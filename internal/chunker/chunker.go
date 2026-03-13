@@ -349,19 +349,33 @@ func (c *Chunker) processChunk(workerID int, chunk Chunk) WorkerResult {
 	c.logger.ChunkStart(workerID, chunk.ID, len(chunk.URLs))
 	
 	// Create crawler for this chunk
+	// Create crawler for this chunk
 	crawlerCfg := crawler.Config{
 		MaxPages:    len(chunk.URLs),
 		MaxDepth:    1,
 		Concurrency: c.config.Concurrency,
 		Delay:       c.config.Delay,
 		Timeout:     c.config.Timeout,
-		Headless:    c.config.Headless,
 		SitemapMode: true,
 		ProductMode: c.config.ProductMode,
 	}
 	
-	crwl := crawler.NewCrawler(crawlerCfg)
-	
+	crwl, err := crawler.NewCrawler(crawlerCfg)
+	if err != nil {
+		for _, u := range chunk.URLs {
+			result.Errors = append(result.Errors, WorkerError{
+				URL:     u,
+				Error:   fmt.Sprintf("failed to create crawler: %v", err),
+				ChunkID: chunk.ID,
+			})
+			atomic.AddInt64(&c.progress.TotalErrors, 1)
+			atomic.AddInt64(&c.progress.ProcessedURLs, 1)
+		}
+		result.EndTime = time.Now()
+		result.Duration = result.EndTime.Sub(startTime)
+		return result
+	}
+
 	// Set up callbacks
 	var pagesMu sync.Mutex
 	crwl.OnPageScraped(func(page models.ScrapedPage) {

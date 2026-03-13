@@ -149,19 +149,24 @@ func (c *Core) executeSitemapCrawl(baseURL string, entries []models.SitemapEntry
 		c.logger.Info("Limited to %d pages (max pages setting)", c.config.MaxPages)
 	}
 
-	c.crawler = crawler.NewCrawler(crawler.Config{
+	crwl, err := crawler.NewCrawler(crawler.Config{
 		MaxPages:       c.config.MaxPages,
 		MaxDepth:       1,
 		Concurrency:    c.config.Concurrency,
 		Delay:          c.effectiveDelay(),
 		Timeout:        c.config.Timeout,
-		Headless:       c.config.Headless,
 		SitemapMode:    true,
 		ProductMode:    c.config.ProductMode,
 		ProductPattern: c.config.CompiledProductPattern,
 		ExtractSpecs:   c.config.ExtractSpecs,
 		ExtractImages:  c.config.ExtractImages,
 	})
+	if err != nil {
+		return nil, NewCrawlError(ErrKindConfig, baseURL, err).
+			WithMessage("failed to create crawler")
+	}
+	c.crawler = crwl
+
 
 	c.setupCrawlerCallbacks()
 
@@ -200,19 +205,24 @@ func (c *Core) executeRecursiveCrawl(targetURL string) ([]models.ScrapedPage, er
 		}
 	}
 
-	c.crawler = crawler.NewCrawler(crawler.Config{
+	crwl, err := crawler.NewCrawler(crawler.Config{
 		MaxPages:       c.config.MaxPages,
 		MaxDepth:       c.config.MaxDepth,
 		Concurrency:    c.config.Concurrency,
 		Delay:          c.effectiveDelay(),
 		Timeout:        c.config.Timeout,
-		Headless:       c.config.Headless,
 		SitemapMode:    false,
 		ProductMode:    c.config.ProductMode,
 		ProductPattern: c.config.CompiledProductPattern,
 		ExtractSpecs:   c.config.ExtractSpecs,
 		ExtractImages:  c.config.ExtractImages,
 	})
+	if err != nil {
+		return nil, NewCrawlError(ErrKindConfig, targetURL, err).
+			WithMessage("failed to create crawler")
+	}
+	c.crawler = crwl
+
 
 	c.setupCrawlerCallbacks()
 
