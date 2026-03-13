@@ -308,10 +308,10 @@ func (c *Crawler) handlePage(e *colly.HTMLElement) {
 		}
 		product := extractor.ExtractProduct(e.DOM, pageURL, opts)
 		
-		if product != nil && product.Name != "" {
+		if product != nil && product.Product.Name != "" {
 			// DEBUG: Log a successful extraction and print the product name
-			log.Printf("[DEBUG] Successfully extracted product: '%s' from URL: %s", product.Name, pageURL)
-			page.Product = product
+			log.Printf("[DEBUG] Successfully extracted product: '%s' from URL: %s", product.Product.Name, pageURL)
+			page.Product = product.Product
 		} else {
 			// DEBUG: Log if the extraction returned nil or an empty product name
 			log.Printf("[DEBUG] Extraction failed or product name was empty for URL: %s", pageURL)
