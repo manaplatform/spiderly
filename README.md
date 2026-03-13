@@ -118,7 +118,7 @@ spiderly -url https://example.com -recursive -depth 5 -timeout 15s -concurrency 
 │   ├── chunker/
 │   │   └── chunker.go       # Parallel chunk processing engine (worker pool)
 │   ├── core/
-│   │   └── core.go          # Core configuration, main run loop, console UI
+│   │   └──        # Core configuration, main run loop, console UI
 │   ├── crawler/              # Colly-based web crawling engine
 │   ├── models/               # Shared data structures (ScrapedPage, CrawlStats, etc.)
 │   ├── scraper/              # Extraction layer binding crawler to data pipeline
