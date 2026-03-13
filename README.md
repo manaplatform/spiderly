@@ -203,6 +203,5 @@ This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) f
 
 ---
 
-<p align="center">
-  <em>Built with ❤️ in Go — happy crawling!</em>
-</p>
+
+*Built with ❤️ in Go — happy crawling!*
