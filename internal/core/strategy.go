@@ -1,8 +1,10 @@
 package core
 
 import (
-	"fmt"
 	"context"
+	"fmt"
+	"strings"
+
 	"spiderly/internal/models"
 	"spiderly/internal/sitemap"
 )
@@ -126,10 +128,19 @@ func (c *Core) strategyFromDiscovery(targetURL string) (strategyResult, error) {
 //  Sitemap Discovery Helpers
 // ─────────────────────────────────────────────
 
+// newSitemapParser creates a sitemap.Parser configured from Core's config.
+func (c *Core) newSitemapParser() *sitemap.Parser {
+	return sitemap.NewParser(
+		sitemap.WithTimeout(c.config.Timeout),
+		sitemap.WithVerbose(c.config.Verbose),
+	)
+}
+
 // discoverSitemapURLs returns sitemap URLs, optionally filtered for product
 // mode.  It checks robots.txt first when a RobotsChecker is available.
 func (c *Core) discoverSitemapURLs(targetURL string) ([]string, error) {
-	parser := sitemap.NewParser(c.config.Timeout, c.config.Verbose)
+	parser := c.newSitemapParser()
+	ctx := context.Background()
 
 	// In product mode, try product-specific sitemaps first
 	if c.config.ProductMode {
@@ -140,7 +151,18 @@ func (c *Core) discoverSitemapURLs(targetURL string) ([]string, error) {
 			filters = c.config.ProductSitemaps
 		}
 
-		urls, err := parser.DiscoverSitemapsFiltered(targetURL, filters)
+		// Build a filter func that matches any of the keywords
+		filterFn := func(sitemapURL string) bool {
+			lower := strings.ToLower(sitemapURL)
+			for _, kw := range filters {
+				if strings.Contains(lower, strings.ToLower(kw)) {
+					return true
+				}
+			}
+			return false
+		}
+
+		urls, err := parser.DiscoverSitemapsFiltered(ctx, targetURL, filterFn)
 		if err == nil && len(urls) > 0 {
 			c.logger.Success("Found %d product sitemap(s)", len(urls))
 			return urls, nil
@@ -149,7 +171,7 @@ func (c *Core) discoverSitemapURLs(targetURL string) ([]string, error) {
 		c.logger.Warning("No product-specific sitemaps — trying all sitemaps")
 	}
 
-	return parser.DiscoverSitemaps(targetURL)
+	return parser.DiscoverSitemaps(ctx, targetURL)
 }
 
 // parseSitemapURLs fetches and parses each sitemap URL, collecting all entries.
@@ -173,8 +195,9 @@ func (c *Core) parseSitemapURLs(sitemapURLs []string) []models.SitemapEntry {
 
 // fetchSitemapEntries wraps the sitemap parser.
 func (c *Core) fetchSitemapEntries(sitemapURL string) ([]models.SitemapEntry, error) {
-	parser := sitemap.NewParser(c.config.Timeout, c.config.Verbose)
-	return parser.ParseSitemap(sitemapURL)
+	parser := c.newSitemapParser()
+	ctx := context.Background()
+	return parser.fetch(ctx, sitemapURL)
 }
 
 // ─────────────────────────────────────────────
