@@ -197,8 +197,23 @@ func (c *Core) parseSitemapURLs(sitemapURLs []string) []models.SitemapEntry {
 func (c *Core) fetchSitemapEntries(sitemapURL string) ([]models.SitemapEntry, error) {
 	parser := c.newSitemapParser()
 	ctx := context.Background()
-	return parser.fetch(ctx, sitemapURL)
+	result, err := parser.Parse(ctx, sitemapURL)
+	if err != nil {
+		return nil, err
+	}
+
+	entries := make([]models.SitemapEntry, 0, len(result.URLs))
+	for _, u := range result.URLs {
+		entries = append(entries, models.SitemapEntry{
+			URL:        u.Loc,
+			LastMod:    u.LastMod,
+			ChangeFreq: u.ChangeFreq,
+			Priority:   float64(u.Priority),
+		})
+	}
+	return entries, nil
 }
+
 
 // ─────────────────────────────────────────────
 //  Deduplication

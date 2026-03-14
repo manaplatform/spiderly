@@ -71,6 +71,7 @@ func NewParser(opts ...Option) *Parser {
 		timeout:         DefaultTimeout,
 		concurrency:     DefaultConcurrency,
 		maxResponseSize: MaxResponseSize,
+		maxDepth:        MaxRecursionDepth, 
 		verbose:         false,
 	}
 
