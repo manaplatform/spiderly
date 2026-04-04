@@ -12,11 +12,17 @@ Spiderly is a fast, flexible command-line web crawler designed for deep site exp
 - Guide Spiderly with sitemap seeds or recursive link-following while tuning depth, timeout, and delay to suit each target URL. Optional priority and URL filters plus the `-recursive` override help you balance auto-discovery with deep traversal. [`cmd/main.go:23-52`]
 
 ### Parallel chunked processing
-- Chunked mode splits the crawl into batches so multiple workers (`-chunk-size`, `-workers`) can fetch pages concurrently while respecting per-worker concurrency, delays, and timeouts. [`cmd/main.go:36-85`]
+- Chunked mode splits the crawl into batches so multiple workers (`--chunk-size`, `--max-workers`) can fetch pages concurrently while respecting per-worker concurrency, delays, and timeouts.
+
+### Proxy support
+- Route crawl traffic through one or more HTTP proxies via `--proxy` or `SPIDERLY_PROXY`. In chunked mode, workers receive sticky proxy assignments (worker index modulo proxy list).
 
 ### Product intelligence
 - Enable `-product-mode` (or provide `-product-pattern`) to focus on ecommerce listings. Product mode auto-promotes chunked processing, raises the default page/chunk/worker counts, and lets you customize the regex that identifies product URLs. [`cmd/main.go:43-118`]
 - Markdown reports surface product summaries, price distributions, stock counts, and per-product metadata whenever product data is available, while JSON output and the console summary keep crawl stats, status codes, and keyword insights organized for automation. [`cmd/main.go:269-405`][`cmd/main.go:500-580`]
+
+### News intelligence
+- Enable `--news-mode` (or provide `--news-pattern`) to focus on article/news pages. News mode prioritizes news-like sitemaps, supports custom sitemap keyword hints via `--news-sitemaps`, and extracts headline/author/publish date/tags using DOM + meta tag parsing (no JSON-LD path).
 
 ### Output & observability
 - Save indented JSON or illustrated Markdown reports, and rely on Spiderly's summary box, verbose logging, and ANSI-safe mode to understand throughput, HTTP statuses, and any errors that arise during the run. [`cmd/main.go:269-365`][`cmd/main.go:539-670`]
@@ -69,12 +75,16 @@ spiderly -url <target> [options]
 | `-delay`             | `200ms`       | Delay between requests (Go duration)                                      |
 | `-chunked`           | `false`       | Enable parallel chunked processing                                        |
 | `-chunk-size`        | `50`          | Number of URLs per chunk                                                  |
-| `-workers`           | `4`           | Number of parallel chunk workers                                          |
+| `--max-workers`      | `4`           | Number of parallel chunk workers (new crawl subcommand flag)              |
+| `--proxy`            | —             | Proxy URL(s), supports repeated or comma-separated values                 |
 | `-sitemap`           | —             | Direct sitemap URL (skip auto-discovery)                                  |
 | `-min-priority`      | `0`           | Minimum sitemap priority filter (0.0 - 1.0)                               |
 | `-url-pattern`       | —             | Regex to filter sitemap URLs                                              |
 | `-product-mode`      | `false`       | Enable product-only crawl mode (auto-enables chunked)                     |
 | `-product-pattern`   | —             | Custom regex for product URLs                                             |
+| `--news-mode`        | `false`       | Enable news/article extraction mode                                       |
+| `--news-pattern`     | —             | Custom regex for news/article URLs                                        |
+| `--news-sitemaps`    | —             | Preferred sitemap keywords for news mode (e.g. `news,press`)             |
 | `-output`            | —             | File path for JSON output                                                 |
 | `-markdown`          | —             | File path for Markdown report output                                      |
 | `-recursive`         | `false`       | Force recursive crawl (skip sitemap discovery)                            |
@@ -91,7 +101,25 @@ spiderly -url https://example.com
 **High-throughput parallel crawl:**
 
 ```bash
-spiderly -url https://example.com -pages 500 -chunked -chunk-size 100 -workers 8
+spiderly crawl https://example.com --max-pages 500 --chunked --chunk-size 100 --max-workers 8
+```
+
+**Crawl through a single proxy:**
+
+```bash
+spiderly crawl https://example.com --proxy http://127.0.0.1:8080
+```
+
+**Rotate proxies across chunk workers:**
+
+```bash
+SPIDERLY_PROXY=http://p1:8080,http://p2:8080 spiderly crawl https://example.com --chunked --max-workers 4
+
+**News crawl with tag parsing:**
+
+```bash
+spiderly crawl https://news.example.com --news-mode --news-pattern "/news|article/" --news-sitemaps news,press,headline
+```
 ```
 
 **Export results to JSON and Markdown:**
@@ -153,12 +181,30 @@ When `-product-mode` is enabled (or a custom `-product-pattern` is provided), Sp
 spiderly -url https://example.com -product-mode -product-pattern "/product/" -output products.json
 ```
 
+### News mode & tag parsing
+When `--news-mode` is enabled (or a custom `--news-pattern` is provided), Spiderly prioritizes news-like sitemap files and parses article metadata from HTML/meta tags and page tag links. This mode does not rely on JSON-LD extraction.
+
+```bash
+spiderly crawl https://news.example.com --news-mode --news-pattern "/news|article/" --news-sitemaps news,press
+```
+
 ### Chunked processing
-Split large crawls into batches of `-chunk-size` URLs processed concurrently across `-workers`. Each chunk worker still respects `-concurrency`, `-delay`, and `-timeout` to maintain throughput and politeness. [`cmd/main.go:36-85`]
+Split large crawls into batches of `--chunk-size` URLs processed concurrently across `--max-workers`. Each chunk worker still respects `--concurrency`, `--delay`, and `--timeout` to maintain throughput and politeness.
 
 ```bash
 # Process 1000 pages in chunks of 200 across 5 workers
-spiderly -url https://example.com -pages 1000 -chunked -chunk-size 200 -workers 5
+spiderly crawl https://example.com --max-pages 1000 --chunked --chunk-size 200 --max-workers 5
+```
+
+### Proxy configuration
+Use `--proxy` for explicit proxy URLs, or `SPIDERLY_PROXY` for environment-based configuration.
+
+```bash
+# Single proxy
+spiderly crawl https://example.com --proxy http://127.0.0.1:8080
+
+# Multiple proxies (comma-separated)
+SPIDERLY_PROXY=http://p1:8080,http://p2:8080 spiderly crawl https://example.com --chunked --max-workers 4
 ```
 
 ### Output formats & logging

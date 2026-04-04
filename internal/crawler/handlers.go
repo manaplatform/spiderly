@@ -42,7 +42,7 @@ func (c *Crawler) handlePage(e *colly.HTMLElement) {
 		ContentLength: int64(len(e.Response.Body)),
 	}
 
-	if !c.config.ProductMode || c.config.ExtractSpecs || c.config.ExtractImages {
+	if !c.config.ProductMode || c.config.ExtractSpecs || c.config.ExtractImages || c.config.NewsMode {
 		page.Content = extractor.ExtractMainContent(e.DOM)
 	}
 
@@ -59,6 +59,25 @@ func (c *Crawler) handlePage(e *colly.HTMLElement) {
 			c.logVerbose("extracted product '%s'", productData.Product.Name)
 		} else {
 			c.logVerbose("no product found on: %s", pageURL)
+		}
+	}
+
+	if c.shouldExtractNews(pageURL) {
+		newsData := extractor.ExtractNews(e.DOM, pageURL)
+		if newsData != nil {
+			page.News = newsData
+			if page.Author == "" {
+				page.Author = newsData.Author
+			}
+			if page.PublishedDate == "" {
+				page.PublishedDate = newsData.PublishedDate
+			}
+			if page.Description == "" {
+				page.Description = newsData.Summary
+			}
+			if page.PageType == "" {
+				page.PageType = "article"
+			}
 		}
 	}
 
@@ -135,4 +154,14 @@ func (c *Crawler) shouldExtractProduct(pageURL string) bool {
 		return true
 	}
 	return c.config.ProductPattern.MatchString(pageURL)
+}
+
+func (c *Crawler) shouldExtractNews(pageURL string) bool {
+	if !c.config.NewsMode {
+		return false
+	}
+	if c.config.NewsPattern == nil {
+		return true
+	}
+	return c.config.NewsPattern.MatchString(pageURL)
 }

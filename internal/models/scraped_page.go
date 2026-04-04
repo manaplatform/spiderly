@@ -5,16 +5,16 @@ import "time"
 // ScrapedPage represents a crawled page with all extracted data
 type ScrapedPage struct {
 	// Basic info
-	URL           string    `json:"url"`
-	Title         string    `json:"title"`
-	H1            string    `json:"h1,omitempty"`
-	Description   string    `json:"description,omitempty"`
-	Keywords      string    `json:"keywords,omitempty"`
-	Author        string    `json:"author,omitempty"`
-	PublishedDate string    `json:"published_date,omitempty"`
-	OGImage       string    `json:"og_image,omitempty"`
-	BodyText      string    `json:"body_text,omitempty"`
-	Canonical     string    `json:"canonical,omitempty"`
+	URL           string `json:"url"`
+	Title         string `json:"title"`
+	H1            string `json:"h1,omitempty"`
+	Description   string `json:"description,omitempty"`
+	Keywords      string `json:"keywords,omitempty"`
+	Author        string `json:"author,omitempty"`
+	PublishedDate string `json:"published_date,omitempty"`
+	OGImage       string `json:"og_image,omitempty"`
+	BodyText      string `json:"body_text,omitempty"`
+	Canonical     string `json:"canonical,omitempty"`
 
 	// Technical info
 	StatusCode    int    `json:"status_code"`
@@ -24,9 +24,10 @@ type ScrapedPage struct {
 	LinksCount    int    `json:"links_count"`
 	ImagesCount   int    `json:"images_count"`
 	Depth         int    `json:"depth"`
-	Content string       `json:"content,omitempty"`
+	Content       string `json:"content,omitempty"`
 	// Product data (when in product mode)
 	Product *ProductInfo `json:"product,omitempty"`
+	News    *NewsData    `json:"news,omitempty"`
 
 	// Page type detection
 	PageType string `json:"page_type,omitempty"` // product, category, article, etc.
@@ -42,8 +43,6 @@ type PriceInfo struct {
 	Seller   string  `json:"seller,omitempty"`
 	InStock  bool    `json:"in_stock"`
 }
-
-
 
 // CrawlStats tracks crawl progress
 type CrawlStats struct {
@@ -69,4 +68,3 @@ type DiscoveredLink struct {
 	SourceURL  string // The page URL where this link was found
 	AnchorText string // The anchor text of the <a> element
 }
-

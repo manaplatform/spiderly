@@ -4,8 +4,10 @@ package crawler
 import (
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/gocolly/colly/v2"
+	collyproxy "github.com/gocolly/colly/v2/proxy"
 )
 
 // setupCollector initialises the colly collector bound to the start URL's domain.
@@ -19,11 +21,23 @@ func (c *Crawler) setupCollector(startURL string) error {
 		return fmt.Errorf("start URL has no host: %s", startURL)
 	}
 
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		hostname = parsed.Host
+	}
+
+	allowedDomains := []string{hostname}
+	if strings.HasPrefix(hostname, "www.") {
+		allowedDomains = append(allowedDomains, strings.TrimPrefix(hostname, "www."))
+	} else {
+		allowedDomains = append(allowedDomains, "www."+hostname)
+	}
+
 	opts := []colly.CollectorOption{
 		colly.Async(true),
 		colly.MaxDepth(c.config.MaxDepth),
 		colly.UserAgent(c.config.UserAgent),
-		colly.AllowedDomains(parsed.Host),
+		colly.AllowedDomains(allowedDomains...),
 	}
 
 	// Optional: let colly honour robots.txt
@@ -32,6 +46,18 @@ func (c *Crawler) setupCollector(startURL string) error {
 	}
 
 	c.collector = colly.NewCollector(opts...)
+
+	if len(c.config.Proxies) == 1 {
+		if err := c.collector.SetProxy(c.config.Proxies[0]); err != nil {
+			return fmt.Errorf("failed to set proxy: %w", err)
+		}
+	} else if len(c.config.Proxies) > 1 {
+		switcher, err := collyproxy.RoundRobinProxySwitcher(c.config.Proxies...)
+		if err != nil {
+			return fmt.Errorf("failed to initialize proxy switcher: %w", err)
+		}
+		c.collector.SetProxyFunc(switcher)
+	}
 
 	// Rate limiting
 	if err := c.collector.Limit(&colly.LimitRule{

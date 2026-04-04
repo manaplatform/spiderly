@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"spiderly/internal/models"
@@ -142,7 +143,17 @@ func (c *Core) discoverSitemapURLs(targetURL string) ([]string, error) {
 	parser := c.newSitemapParser()
 	ctx := context.Background()
 
-	// In product mode, try product-specific sitemaps first
+	sitemapURLs, err := parser.DiscoverSitemaps(ctx, targetURL)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(sitemapURLs) == 0 {
+		return sitemapURLs, nil
+	}
+
+	// In product mode, prioritize product-specific sitemaps first while
+	// still preserving all discovered sitemaps.
 	if c.config.ProductMode {
 		c.logger.Info("Product mode enabled — prioritizing product sitemaps")
 
@@ -162,16 +173,65 @@ func (c *Core) discoverSitemapURLs(targetURL string) ([]string, error) {
 			return false
 		}
 
-		urls, err := parser.DiscoverSitemapsFiltered(ctx, targetURL, filterFn)
-		if err == nil && len(urls) > 0 {
-			c.logger.Success("Found %d product sitemap(s)", len(urls))
-			return urls, nil
+		prioritized, matched := prioritizeSitemaps(sitemapURLs, filterFn)
+		if matched > 0 {
+			c.logger.Success("Found %d product sitemap(s) (using all %d discovered)", matched, len(prioritized))
+			return prioritized, nil
 		}
 
-		c.logger.Warning("No product-specific sitemaps — trying all sitemaps")
+		c.logger.Warning("No product-specific sitemaps — using all discovered sitemaps")
 	}
 
-	return parser.DiscoverSitemaps(ctx, targetURL)
+	if c.config.NewsMode {
+		c.logger.Info("News mode enabled — prioritizing news sitemaps")
+
+		filters := []string{"news", "press", "headline", "article"}
+		if len(c.config.NewsSitemaps) > 0 {
+			filters = c.config.NewsSitemaps
+		}
+
+		filterFn := func(sitemapURL string) bool {
+			lower := strings.ToLower(sitemapURL)
+			for _, kw := range filters {
+				if strings.Contains(lower, strings.ToLower(kw)) {
+					return true
+				}
+			}
+			return false
+		}
+
+		prioritized, matched := prioritizeSitemaps(sitemapURLs, filterFn)
+		if matched > 0 {
+			c.logger.Success("Found %d news sitemap(s) (using all %d discovered)", matched, len(prioritized))
+			return prioritized, nil
+		}
+
+		c.logger.Warning("No news-specific sitemaps — using all discovered sitemaps")
+	}
+
+	return sitemapURLs, nil
+}
+
+func prioritizeSitemaps(sitemapURLs []string, matches func(string) bool) ([]string, int) {
+	prioritized := append([]string(nil), sitemapURLs...)
+	matched := 0
+
+	for _, sitemapURL := range prioritized {
+		if matches(sitemapURL) {
+			matched++
+		}
+	}
+
+	sort.SliceStable(prioritized, func(i, j int) bool {
+		left := matches(prioritized[i])
+		right := matches(prioritized[j])
+		if left == right {
+			return false
+		}
+		return left && !right
+	})
+
+	return prioritized, matched
 }
 
 // parseSitemapURLs fetches and parses each sitemap URL, collecting all entries.
@@ -213,7 +273,6 @@ func (c *Core) fetchSitemapEntries(sitemapURL string) ([]models.SitemapEntry, er
 	}
 	return entries, nil
 }
-
 
 // ─────────────────────────────────────────────
 //  Deduplication
@@ -261,6 +320,10 @@ func (c *Core) applyAllFilters(entries []models.SitemapEntry) []models.SitemapEn
 	// 2. Product mode filter
 	if c.config.ProductMode {
 		filtered, _ = c.filterProductEntries(filtered)
+	}
+
+	if c.config.NewsMode {
+		filtered, _ = c.filterNewsEntries(filtered)
 	}
 
 	// 3. robots.txt filter

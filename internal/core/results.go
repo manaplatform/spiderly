@@ -37,6 +37,14 @@ type ProductResult struct {
 	Specs         map[string]string `json:"specs,omitempty"`
 }
 
+type NewsResult struct {
+	Headline      string   `json:"headline,omitempty"`
+	Author        string   `json:"author,omitempty"`
+	PublishedDate string   `json:"published_date,omitempty"`
+	Summary       string   `json:"summary,omitempty"`
+	Tags          []string `json:"tags,omitempty"`
+}
+
 // ScrapedPageResult is the public-facing result for a single crawled page.
 type ScrapedPageResult struct {
 	URL           string    `json:"url"`
@@ -60,6 +68,7 @@ type ScrapedPageResult struct {
 
 	// Product data (populated when ProductMode is enabled)
 	Product *ProductResult `json:"product,omitempty"`
+	News    *NewsResult    `json:"news,omitempty"`
 }
 
 // ─────────────────────────────────────────────
@@ -92,8 +101,24 @@ func ToScrapedPageResult(p models.ScrapedPage) ScrapedPageResult {
 	if p.Product != nil {
 		r.Product = toProductResult(p.Product)
 	}
+	if p.News != nil {
+		r.News = toNewsResult(p.News)
+	}
 
 	return r
+}
+
+func toNewsResult(n *models.NewsData) *NewsResult {
+	if n == nil {
+		return nil
+	}
+	return &NewsResult{
+		Headline:      n.Headline,
+		Author:        n.Author,
+		PublishedDate: n.PublishedDate,
+		Summary:       n.Summary,
+		Tags:          n.Tags,
+	}
 }
 
 // ToScrapedPageResults converts a slice of internal pages to export results.
@@ -255,7 +280,6 @@ func (rc *ResultCollector) Close() error {
 	return nil
 }
 
-
 // ─────────────────────────────────────────────
 //  Built-in Sinks
 // ─────────────────────────────────────────────
@@ -297,7 +321,6 @@ func (s *JSONStreamSink) Write(page models.ScrapedPage) error {
 	return nil
 }
 
-
 func (s *JSONStreamSink) Close() error {
 	// Flush if writer supports it
 	if f, ok := s.writer.(interface{ Flush() error }); ok {
@@ -335,11 +358,11 @@ func (s *CallbackSink) Write(page models.ScrapedPage) error {
 
 	if err := s.fn(result); err != nil {
 		return &CrawlError{
-		Type:      ErrInternal,
-		URL:       page.URL,
-		Message:   fmt.Sprintf("..."),
-		Cause:     err,
-		Timestamp: time.Now(),
+			Type:      ErrInternal,
+			URL:       page.URL,
+			Message:   fmt.Sprintf("..."),
+			Cause:     err,
+			Timestamp: time.Now(),
 		}
 	}
 	return nil

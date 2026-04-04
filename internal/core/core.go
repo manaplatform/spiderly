@@ -33,15 +33,15 @@ type Core struct {
 
 	// P0: URL normalization & deduplication
 	normalizer *URLNormalizer
-	errors []*CrawlError // collected crawl errors
+	errors     []*CrawlError // collected crawl errors
 
 	// P0: robots.txt compliance
 	robots *RobotsChecker
 
 	// P1: Streaming sinks for memory-efficient output
 	sinks []Sink
-	seen *URLDedup // URL deduplication set
-	sink Sink  
+	seen  *URLDedup // URL deduplication set
+	sink  Sink
 }
 
 // ─────────────────────────────────────────────
@@ -130,7 +130,6 @@ func NewCore(cfg CoreConfig) *Core {
 		Timeout:   cfg.Timeout,
 	})
 
-
 	return c
 }
 
@@ -177,6 +176,13 @@ func (c *Core) ApplyConfig(cfg CoreConfig) {
 	if cfg.ProductPattern != "" {
 		c.config.ProductPattern = cfg.ProductPattern
 	}
+	if cfg.NewsPattern != "" {
+		c.config.NewsPattern = cfg.NewsPattern
+	}
+	if len(cfg.Proxies) > 0 {
+		c.config.Proxies = make([]string, len(cfg.Proxies))
+		copy(c.config.Proxies, cfg.Proxies)
+	}
 	if cfg.UserAgent != "" {
 		c.config.UserAgent = cfg.UserAgent
 		c.robots = NewRobotsChecker(RobotsConfig{
@@ -197,11 +203,15 @@ func (c *Core) ApplyConfig(cfg CoreConfig) {
 
 	// Product mode settings
 	c.config.ProductMode = cfg.ProductMode
+	c.config.NewsMode = cfg.NewsMode
 	c.config.ExtractSpecs = cfg.ExtractSpecs
 	c.config.ExtractImages = cfg.ExtractImages
 
 	if len(cfg.ProductSitemaps) > 0 {
 		c.config.ProductSitemaps = cfg.ProductSitemaps
+	}
+	if len(cfg.NewsSitemaps) > 0 {
+		c.config.NewsSitemaps = cfg.NewsSitemaps
 	}
 	if len(cfg.ExcludePatterns) > 0 {
 		c.config.ExcludePatterns = cfg.ExcludePatterns
@@ -222,7 +232,6 @@ func (c *Core) ApplyConfig(cfg CoreConfig) {
 // ─────────────────────────────────────────────
 //  color
 // ─────────────────────────────────────────────
-
 
 // color is a convenience wrapper for the logger's color method.
 func (c *Core) color(clr, text string) string {
@@ -304,7 +313,6 @@ func (c *Core) shouldCrawlURL(rawURL string) (string, bool) {
 
 	return normalized, true
 }
-
 
 // ─────────────────────────────────────────────
 //  Public Accessors & Lifecycle

@@ -156,17 +156,19 @@ func (c *Core) executeSitemapCrawl(baseURL string, entries []models.SitemapEntry
 		Delay:          c.effectiveDelay(),
 		Timeout:        c.config.Timeout,
 		SitemapMode:    true,
+		Proxies:        c.config.Proxies,
 		ProductMode:    c.config.ProductMode,
 		ProductPattern: c.config.CompiledProductPattern,
 		ExtractSpecs:   c.config.ExtractSpecs,
 		ExtractImages:  c.config.ExtractImages,
+		NewsMode:       c.config.NewsMode,
+		NewsPattern:    c.config.CompiledNewsPattern,
 	})
 	if err != nil {
 		return nil, NewCrawlError(ErrKindConfig, baseURL, err).
 			WithMessage("failed to create crawler")
 	}
 	c.crawler = crwl
-
 
 	c.setupCrawlerCallbacks()
 
@@ -183,7 +185,6 @@ func (c *Core) executeSitemapCrawl(baseURL string, entries []models.SitemapEntry
 	c.mu.Lock()
 	c.results = results
 	c.mu.Unlock()
-
 
 	return results, nil
 }
@@ -212,17 +213,19 @@ func (c *Core) executeRecursiveCrawl(targetURL string) ([]models.ScrapedPage, er
 		Delay:          c.effectiveDelay(),
 		Timeout:        c.config.Timeout,
 		SitemapMode:    false,
+		Proxies:        c.config.Proxies,
 		ProductMode:    c.config.ProductMode,
 		ProductPattern: c.config.CompiledProductPattern,
 		ExtractSpecs:   c.config.ExtractSpecs,
 		ExtractImages:  c.config.ExtractImages,
+		NewsMode:       c.config.NewsMode,
+		NewsPattern:    c.config.CompiledNewsPattern,
 	})
 	if err != nil {
 		return nil, NewCrawlError(ErrKindConfig, targetURL, err).
 			WithMessage("failed to create crawler")
 	}
 	c.crawler = crwl
-
 
 	c.setupCrawlerCallbacks()
 
@@ -235,7 +238,6 @@ func (c *Core) executeRecursiveCrawl(targetURL string) ([]models.ScrapedPage, er
 	c.mu.Lock()
 	c.results = results
 	c.mu.Unlock()
-
 
 	return results, nil
 }
@@ -265,10 +267,13 @@ func (c *Core) executeChunkedSitemapCrawl(baseURL string, entries []models.Sitem
 		Headless:       c.config.Headless,
 		Verbose:        c.config.Verbose,
 		NoColor:        c.config.NoColor,
+		Proxies:        c.config.Proxies,
 		ProductMode:    c.config.ProductMode,
 		ProductPattern: c.config.ProductPattern,
 		ExtractSpecs:   c.config.ExtractSpecs,
 		ExtractImages:  c.config.ExtractImages,
+		NewsMode:       c.config.NewsMode,
+		NewsPattern:    c.config.CompiledNewsPattern,
 	})
 
 	c.chunker.OnPageScraped(func(page models.ScrapedPage, chunkID int) {

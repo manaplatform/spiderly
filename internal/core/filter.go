@@ -20,6 +20,7 @@ type FilterResult struct {
 	DroppedByURLPattern int
 	DroppedByExclude    int
 	DroppedByProduct    int
+	DroppedByNews       int
 	DroppedByDuplicate  int
 }
 
@@ -129,6 +130,53 @@ func (c *Core) filterProductEntries(entries []models.SitemapEntry) ([]models.Sit
 	return filtered, fr
 }
 
+// filterNewsEntries keeps only URLs that look like news/article pages.
+// It applies exclude patterns first, then the optional positive news regex.
+func (c *Core) filterNewsEntries(entries []models.SitemapEntry) ([]models.SitemapEntry, FilterResult) {
+	fr := FilterResult{InputCount: len(entries)}
+
+	if !c.config.NewsMode {
+		fr.OutputCount = len(entries)
+		return entries, fr
+	}
+
+	excludeRegexes := c.resolveExcludePatterns()
+	seen := make(map[string]struct{}, len(entries))
+	filtered := make([]models.SitemapEntry, 0, len(entries))
+
+	for _, entry := range entries {
+		norm := NormalizeURL(entry.URL)
+		if norm == "" {
+			fr.DroppedByURLPattern++
+			continue
+		}
+		if _, dup := seen[norm]; dup {
+			fr.DroppedByDuplicate++
+			continue
+		}
+		seen[norm] = struct{}{}
+
+		if matchesAny(entry.URL, excludeRegexes) {
+			fr.DroppedByExclude++
+			continue
+		}
+
+		if c.config.CompiledNewsPattern != nil && !c.config.CompiledNewsPattern.MatchString(entry.URL) {
+			fr.DroppedByNews++
+			continue
+		}
+
+		filtered = append(filtered, entry)
+	}
+
+	fr.OutputCount = len(filtered)
+	c.logger.Verbose("News filter: %d → %d entries (excl=%d, pattern=%d, dup=%d)",
+		fr.InputCount, fr.OutputCount,
+		fr.DroppedByExclude, fr.DroppedByNews, fr.DroppedByDuplicate)
+
+	return filtered, fr
+}
+
 // ─────────────────────────────────────────────
 //  Deduplication (general purpose)
 // ─────────────────────────────────────────────
@@ -194,6 +242,14 @@ var defaultProductSitemapKeywords = []string{
 	"merchandise",
 }
 
+var defaultNewsSitemapKeywords = []string{
+	"news",
+	"press",
+	"headline",
+	"article",
+	"story",
+}
+
 // IsProductSitemap returns true if the sitemap URL looks like it
 // contains product pages, based on keyword heuristics.
 func IsProductSitemap(sitemapURL string, extraKeywords []string) bool {
@@ -218,6 +274,32 @@ func FilterProductSitemaps(sitemapURLs []string, keywords []string) []string {
 	var out []string
 	for _, u := range sitemapURLs {
 		if IsProductSitemap(u, keywords) {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+func IsNewsSitemap(sitemapURL string, extraKeywords []string) bool {
+	lower := strings.ToLower(sitemapURL)
+
+	keywords := defaultNewsSitemapKeywords
+	if len(extraKeywords) > 0 {
+		keywords = extraKeywords
+	}
+
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func FilterNewsSitemaps(sitemapURLs []string, keywords []string) []string {
+	var out []string
+	for _, u := range sitemapURLs {
+		if IsNewsSitemap(u, keywords) {
 			out = append(out, u)
 		}
 	}

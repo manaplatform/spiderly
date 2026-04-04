@@ -56,10 +56,11 @@ type CoreConfig struct {
 	URLPattern  string  `json:"url_pattern,omitempty"`
 
 	// ── Behavior flags ──
-	ForceRecursive bool `json:"force_recursive"`
-	Headless       bool `json:"headless"`
-	Verbose        bool `json:"verbose"`
-	NoColor        bool `json:"no_color"`
+	ForceRecursive bool     `json:"force_recursive"`
+	Headless       bool     `json:"headless"`
+	Verbose        bool     `json:"verbose"`
+	NoColor        bool     `json:"no_color"`
+	Proxies        []string `json:"proxies,omitempty"`
 
 	// ── Retry ──
 	MaxRetries int           `json:"max_retries"`
@@ -70,21 +71,24 @@ type CoreConfig struct {
 	ChunkSize      int    `json:"chunk_size"`
 	MaxWorkers     int    `json:"max_workers"`
 	ProductPattern string `json:"product_pattern,omitempty"` // Raw pattern string
+	NewsPattern    string `json:"news_pattern,omitempty"`
 
 	// ── Product mode ──
 	ProductMode     bool     `json:"product_mode"`
 	ProductSitemaps []string `json:"product_sitemaps,omitempty"`
 	ExtractSpecs    bool     `json:"extract_specs"`
 	ExtractImages   bool     `json:"extract_images"`
+	NewsMode        bool     `json:"news_mode"`
+	NewsSitemaps    []string `json:"news_sitemaps,omitempty"`
 	ExcludePatterns []string `json:"exclude_patterns,omitempty"`
 
 	// ── Robots.txt ──
-	RespectRobotsTxt bool `json:"respect_robots_txt"`
+	RespectRobotsTxt bool   `json:"respect_robots_txt"`
 	UserAgent        string `json:"user_agent,omitempty"`
 
 	// ── Normalization ──
-	EnableNormalization bool `json:"enable_normalization"`
-    DisableNormalization bool
+	EnableNormalization  bool `json:"enable_normalization"`
+	DisableNormalization bool
 
 	// ── Streaming sink ──
 	SinkType   SinkType `json:"sink_type,omitempty"`
@@ -94,10 +98,11 @@ type CoreConfig struct {
 	// ── Compiled (internal, not serialized) ──
 	CompiledExcludePatterns []*regexp.Regexp `json:"-"`
 	CompiledProductPattern  *regexp.Regexp   `json:"-"`
+	CompiledNewsPattern     *regexp.Regexp   `json:"-"`
 	CompiledURLPattern      *regexp.Regexp   `json:"-"`
-	RetryConfig RetryConfig
+	RetryConfig             RetryConfig
 	// -- robots
-	RespectRobots        bool
+	RespectRobots bool
 }
 
 // ─────────────────────────────────────────────
@@ -280,6 +285,17 @@ func WithNoColor(v bool) Option {
 	return func(c *CoreConfig) { c.NoColor = v }
 }
 
+// WithProxies sets one or more proxy URLs for crawl requests.
+func WithProxies(proxies []string) Option {
+	return func(c *CoreConfig) {
+		if len(proxies) == 0 {
+			return
+		}
+		c.Proxies = make([]string, len(proxies))
+		copy(c.Proxies, proxies)
+	}
+}
+
 // WithChunker enables chunked crawling for large sitemaps.
 func WithChunker(chunkSize, maxWorkers int) Option {
 	return func(c *CoreConfig) {
@@ -300,6 +316,17 @@ func WithProductMode(pattern string, sitemaps []string) Option {
 		c.ProductPattern = pattern
 		if len(sitemaps) > 0 {
 			c.ProductSitemaps = sitemaps
+		}
+	}
+}
+
+// WithNewsMode enables news extraction mode.
+func WithNewsMode(pattern string, sitemaps []string) Option {
+	return func(c *CoreConfig) {
+		c.NewsMode = true
+		c.NewsPattern = pattern
+		if len(sitemaps) > 0 {
+			c.NewsSitemaps = sitemaps
 		}
 	}
 }
@@ -414,6 +441,16 @@ func (cfg *CoreConfig) Validate() error {
 		return NewConfigError("delay", "must be >= 0")
 	}
 
+	for _, rawProxy := range cfg.Proxies {
+		parsed, err := url.Parse(rawProxy)
+		if err != nil {
+			return NewConfigError("proxies", fmt.Sprintf("invalid proxy URL %q: %v", rawProxy, err))
+		}
+		if parsed.Scheme == "" || parsed.Host == "" {
+			return NewConfigError("proxies", fmt.Sprintf("proxy URL %q must include scheme and host", rawProxy))
+		}
+	}
+
 	// Retry bounds
 	if cfg.MaxRetries < 0 {
 		return NewConfigError("max_retries", "must be >= 0")
@@ -430,6 +467,10 @@ func (cfg *CoreConfig) Validate() error {
 		if cfg.MaxWorkers <= 0 {
 			return NewConfigError("max_workers", "must be > 0 when chunker is enabled")
 		}
+	}
+
+	if cfg.ProductMode && cfg.NewsMode {
+		return NewConfigError("mode", "product_mode and news_mode cannot both be enabled")
 	}
 
 	// MinPriority range
@@ -468,6 +509,15 @@ func (cfg *CoreConfig) CompilePatterns() error {
 			return NewConfigError("product_pattern", fmt.Sprintf("invalid regex: %v", err))
 		}
 		cfg.CompiledProductPattern = re
+	}
+
+	// Compile news pattern
+	if cfg.NewsPattern != "" {
+		re, err := regexp.Compile(cfg.NewsPattern)
+		if err != nil {
+			return NewConfigError("news_pattern", fmt.Sprintf("invalid regex: %v", err))
+		}
+		cfg.CompiledNewsPattern = re
 	}
 
 	// Compile exclude patterns
@@ -518,9 +568,17 @@ func (cfg *CoreConfig) Clone() CoreConfig {
 		clone.ProductSitemaps = make([]string, len(cfg.ProductSitemaps))
 		copy(clone.ProductSitemaps, cfg.ProductSitemaps)
 	}
+	if cfg.NewsSitemaps != nil {
+		clone.NewsSitemaps = make([]string, len(cfg.NewsSitemaps))
+		copy(clone.NewsSitemaps, cfg.NewsSitemaps)
+	}
 	if cfg.ExcludePatterns != nil {
 		clone.ExcludePatterns = make([]string, len(cfg.ExcludePatterns))
 		copy(clone.ExcludePatterns, cfg.ExcludePatterns)
+	}
+	if cfg.Proxies != nil {
+		clone.Proxies = make([]string, len(cfg.Proxies))
+		copy(clone.Proxies, cfg.Proxies)
 	}
 	// Compiled patterns are safe to share (regexp is goroutine-safe)
 
@@ -548,6 +606,12 @@ func (cfg *CoreConfig) String() string {
 		fmt.Fprintf(&b, "  ProductMode: true\n")
 		if cfg.ProductPattern != "" {
 			fmt.Fprintf(&b, "  ProductPat:  %s\n", cfg.ProductPattern)
+		}
+	}
+	if cfg.NewsMode {
+		fmt.Fprintf(&b, "  NewsMode:    true\n")
+		if cfg.NewsPattern != "" {
+			fmt.Fprintf(&b, "  NewsPat:     %s\n", cfg.NewsPattern)
 		}
 	}
 	if cfg.EnableChunker {
