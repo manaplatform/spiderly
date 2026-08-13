@@ -39,7 +39,7 @@ Spiderly is a fast, flexible command-line web crawler designed for deep site exp
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/spiderly.git
+git clone https://github.com/manaplatform/spiderly
 cd spiderly
 
 # Download dependencies
