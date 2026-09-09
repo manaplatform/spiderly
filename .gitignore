@@ -1,7 +1,5 @@
 # Environment and artifacts
 .env
-.mana_index/
-.mana_llm_logs/
 
 # Build outputs
 bin/
@@ -42,3 +40,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# build
+spiderly

@@ -46,7 +46,7 @@ cd spiderly
 go mod download
 
 # Build the binary
-go build -o spiderly cmd/main.go
+go build -o spiderly cmd/spiderly/main.go
 ```
 
 ### Using `go install`
