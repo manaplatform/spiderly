@@ -1,4 +1,8 @@
-![Spiderly Logo](logo.png)
+
+<p align="center">
+  <img src="logo.png" alt="Spiderly Logo" width="300">
+</p>
+
 # Spiderly
 
 > A high-performance, concurrent web crawler and scraper built in Go.
