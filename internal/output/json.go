@@ -1,6 +1,7 @@
 package output
 
 import (
+	"bufio"
 	"encoding/json"
 	"os"
 
@@ -24,9 +25,19 @@ func RenderJSON(r report.CrawlReport, pretty bool) (string, error) {
 }
 
 func WriteJSONFile(path string, r report.CrawlReport, pretty bool) error {
-	s, err := RenderJSON(r, pretty)
+	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(s), 0o644)
+	defer f.Close()
+
+	bw := bufio.NewWriterSize(f, 64*1024)
+	enc := json.NewEncoder(bw)
+	if pretty {
+		enc.SetIndent("", "  ")
+	}
+	if err := enc.Encode(r); err != nil {
+		return err
+	}
+	return bw.Flush()
 }

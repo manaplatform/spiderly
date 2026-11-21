@@ -4,6 +4,7 @@ package crawler
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"spiderly/internal/extractor"
@@ -80,6 +81,14 @@ func (c *Crawler) handlePage(e *colly.HTMLElement) {
 	pageURL := e.Request.URL.String()
 	c.logVerbose("handling page: %s", pageURL)
 
+	reqDepth := e.Request.Depth
+	if dStr := e.Request.Ctx.Get("depth"); dStr != "" {
+		if d, err := strconv.Atoi(dStr); err == nil {
+			reqDepth = d
+		}
+	}
+	parentURL := e.Request.Ctx.Get("parent_url")
+
 	// Check if fallback browser rendering should be triggered
 	if c.browser != nil && c.config.BrowserStrategy == "fallback" {
 		if jsNeeded, reason := DetectJSRequired(e.Response.StatusCode, string(e.Response.Body), e.DOM, c.config.ClickCrawl); jsNeeded {
@@ -98,7 +107,7 @@ func (c *Crawler) handlePage(e *colly.HTMLElement) {
 						targetURL = pageURL
 					}
 
-					renderedPage := c.extractPageFromDOM(targetURL, doc.Selection, res.StatusCode, res.ContentLength, e.Request.Depth)
+					renderedPage := c.extractPageFromDOM(targetURL, doc.Selection, res.StatusCode, res.ContentLength, reqDepth, parentURL)
 					if res.Title != "" {
 						renderedPage.Title = res.Title
 					}
@@ -106,16 +115,16 @@ func (c *Crawler) handlePage(e *colly.HTMLElement) {
 						renderedPage.URL = pageURL
 					}
 
+					if !c.config.SitemapMode {
+						c.extractLinksFromDOM(doc.Selection, targetURL, reqDepth)
+					}
+					if len(res.DiscoveredLinks) > 0 {
+						c.enqueueDiscoveredLinks(res.DiscoveredLinks, reqDepth, targetURL)
+					}
+
 					c.addResult(renderedPage)
 					if c.onPageScraped != nil {
 						c.onPageScraped(renderedPage)
-					}
-
-					if !c.config.SitemapMode {
-						c.extractLinksFromDOM(doc.Selection, targetURL, e.Request.Depth)
-					}
-					if len(res.DiscoveredLinks) > 0 {
-						c.enqueueDiscoveredLinks(res.DiscoveredLinks, e.Request.Depth, targetURL)
 					}
 					return
 				}
@@ -130,7 +139,11 @@ func (c *Crawler) handlePage(e *colly.HTMLElement) {
 		return
 	}
 
-	page := c.extractPageFromDOM(pageURL, e.DOM, e.Response.StatusCode, int64(len(e.Response.Body)), e.Request.Depth)
+	page := c.extractPageFromDOM(pageURL, e.DOM, e.Response.StatusCode, int64(len(e.Response.Body)), reqDepth, parentURL)
+
+	if !c.config.SitemapMode {
+		c.extractLinksFromDOM(e.DOM, pageURL, reqDepth)
+	}
 
 	c.addResult(page)
 	if c.onPageScraped != nil {
@@ -154,7 +167,7 @@ func (c *Crawler) incrementScrapedCount(pageURL string) bool {
 }
 
 // extractPageFromDOM extracts structured data from a GoQuery selection.
-func (c *Crawler) extractPageFromDOM(pageURL string, sel *goquery.Selection, statusCode int, contentLength int64, depth int) models.ScrapedPage {
+func (c *Crawler) extractPageFromDOM(pageURL string, sel *goquery.Selection, statusCode int, contentLength int64, depth int, parentURL string) models.ScrapedPage {
 	title := strings.TrimSpace(sel.Find("title").First().Text())
 
 	page := models.ScrapedPage{
@@ -163,10 +176,33 @@ func (c *Crawler) extractPageFromDOM(pageURL string, sel *goquery.Selection, sta
 		StatusCode:    statusCode,
 		ContentLength: contentLength,
 		Depth:         depth,
+		ParentURL:     parentURL,
 	}
 
 	if !c.config.ProductMode || c.config.ExtractSpecs || c.config.ExtractImages || c.config.NewsMode {
 		page.Content = extractor.ExtractMainContent(sel)
+	}
+
+	// Always extract structured data (JSON-LD and DOM breadcrumbs)
+	sd := extractor.ExtractJSONLD(sel)
+	if sd != nil {
+		page.StructuredData = sd
+		if len(sd.Breadcrumbs) > 0 {
+			page.Breadcrumbs = sd.Breadcrumbs
+		}
+		if sd.Category != "" {
+			page.Category = sd.Category
+		}
+		if (sd.Name != "" || sd.Price > 0 || sd.SKU != "") && page.Product == nil {
+			page.Product = sd.ToProductInfo()
+			if page.PageType == "" {
+				page.PageType = "product"
+			}
+		}
+	}
+
+	if len(page.Breadcrumbs) == 0 {
+		page.Breadcrumbs = extractor.ExtractDOMBreadcrumbs(sel)
 	}
 
 	if c.shouldExtractProduct(pageURL) {
@@ -179,6 +215,9 @@ func (c *Crawler) extractPageFromDOM(pageURL string, sel *goquery.Selection, sta
 
 		if productData != nil && productData.Product.Name != "" {
 			page.Product = productData.Product
+			if page.PageType == "" {
+				page.PageType = "product"
+			}
 			c.logVerbose("extracted product '%s'", productData.Product.Name)
 		} else {
 			c.logVerbose("no product found on: %s", pageURL)
@@ -208,7 +247,9 @@ func (c *Crawler) extractPageFromDOM(pageURL string, sel *goquery.Selection, sta
 }
 
 // extractLinksFromDOM finds all valid <a href> links in a DOM selection and enqueues them.
-func (c *Crawler) extractLinksFromDOM(sel *goquery.Selection, sourceURL string, depth int) {
+func (c *Crawler) extractLinksFromDOM(sel *goquery.Selection, sourceURL string, depth int) []string {
+	var discovered []string
+
 	sel.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
 		href, ok := s.Attr("href")
 		if !ok || href == "" || strings.HasPrefix(href, "javascript:") || href == "#" {
@@ -225,6 +266,13 @@ func (c *Crawler) extractLinksFromDOM(sel *goquery.Selection, sourceURL string, 
 			c.logVerbose("skip %s: %s", absURL, skipReason)
 			return
 		}
+
+		if c.config.RobotsValidator != nil && !c.config.RobotsValidator(normalizedURL) {
+			c.logVerbose("skip %s: disallowed by robots.txt", normalizedURL)
+			return
+		}
+
+		discovered = append(discovered, normalizedURL)
 
 		newDepth := depth + 1
 		if newDepth > c.config.MaxDepth {
@@ -249,6 +297,8 @@ func (c *Crawler) extractLinksFromDOM(sel *goquery.Selection, sourceURL string, 
 			c.onLinkDiscovered(sourceURL, normalizedURL)
 		}
 	})
+
+	return discovered
 }
 
 // enqueueDiscoveredLinks enqueues links found via click-crawler interactions.
@@ -262,6 +312,11 @@ func (c *Crawler) enqueueDiscoveredLinks(links []string, depth int, sourceURL st
 		normalizedURL, skipReason := c.normalizeAndFilterURL(rawLink)
 		if normalizedURL == "" {
 			c.logVerbose("skip click link %s: %s", rawLink, skipReason)
+			continue
+		}
+
+		if c.config.RobotsValidator != nil && !c.config.RobotsValidator(normalizedURL) {
+			c.logVerbose("skip click link %s: disallowed by robots.txt", normalizedURL)
 			continue
 		}
 
@@ -320,7 +375,19 @@ func (c *Crawler) handleLink(e *colly.HTMLElement) {
 		return
 	}
 
-	newDepth := e.Request.Depth + 1
+	if c.config.RobotsValidator != nil && !c.config.RobotsValidator(normalizedURL) {
+		c.logVerbose("skip %s: disallowed by robots.txt", normalizedURL)
+		return
+	}
+
+	reqDepth := e.Request.Depth
+	if dStr := e.Request.Ctx.Get("depth"); dStr != "" {
+		if d, err := strconv.Atoi(dStr); err == nil {
+			reqDepth = d
+		}
+	}
+
+	newDepth := reqDepth + 1
 	if newDepth > c.config.MaxDepth {
 		c.logVerbose("depth exceeded for %s (%d > %d)", normalizedURL, newDepth, c.config.MaxDepth)
 		return

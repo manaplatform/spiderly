@@ -219,6 +219,17 @@ func (c *Core) executeRecursiveCrawl(targetURL string) ([]models.ScrapedPage, er
 		Delay:          c.effectiveDelay(),
 		Timeout:        c.config.Timeout,
 		SitemapMode:    false,
+		RespectRobots:  c.config.RespectRobotsTxt,
+		RobotsValidator: func(target string) bool {
+			if c.robots == nil || !c.config.RespectRobotsTxt {
+				return true
+			}
+			allowed, err := c.robots.IsAllowed(context.Background(), target)
+			if err != nil {
+				return true
+			}
+			return allowed
+		},
 		Proxies:        c.config.Proxies,
 		ProductMode:    c.config.ProductMode,
 		ProductPattern: c.config.CompiledProductPattern,

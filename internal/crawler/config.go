@@ -21,6 +21,7 @@ type Config struct {
 	Verbose       bool
 	SitemapMode   bool
 	RespectRobots bool
+	RobotsValidator func(targetURL string) bool
 	Proxies       []string
 
 	// Product extraction

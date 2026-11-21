@@ -157,11 +157,22 @@ func (c *Crawler) drainQueue() ([]models.ScrapedPage, error) {
 		}
 		visited[link.URL] = true
 
+		if c.config.RobotsValidator != nil && !c.config.RobotsValidator(link.URL) {
+			c.logVerbose("skip %s: disallowed by robots.txt", link.URL)
+			continue
+		}
+
+		// Attach context so depth and parent URL are preserved across Colly request lifecycle
+		ctx := colly.NewContext()
+		ctx.Put("depth", fmt.Sprintf("%d", link.Depth))
+		ctx.Put("parent_url", link.SourceURL)
+		ctx.Put("anchor_text", link.AnchorText)
+
 		// Strategy dispatch: "always" uses ChromeDP directly; "fallback" uses Colly with JS fallback
 		if c.browser != nil && c.config.BrowserStrategy == "always" {
-			if err := c.crawlURLWithBrowser(link.URL, link.Depth); err != nil {
+			if err := c.crawlURLWithBrowser(link.URL, link.Depth, link.SourceURL); err != nil {
 				c.logVerbose("browser render failed for %s (%v); falling back to Colly", link.URL, err)
-				if err := c.collector.Visit(link.URL); err != nil {
+				if err := c.collector.Request("GET", link.URL, nil, ctx, nil); err != nil {
 					c.logVerbose("visit failed: %s — %v", link.URL, err)
 					if c.onError != nil {
 						c.onError(link.URL, err)
@@ -169,7 +180,7 @@ func (c *Crawler) drainQueue() ([]models.ScrapedPage, error) {
 				}
 			}
 		} else {
-			if err := c.collector.Visit(link.URL); err != nil {
+			if err := c.collector.Request("GET", link.URL, nil, ctx, nil); err != nil {
 				c.logVerbose("visit failed: %s — %v", link.URL, err)
 				if c.onError != nil {
 					c.onError(link.URL, err)
@@ -183,7 +194,7 @@ func (c *Crawler) drainQueue() ([]models.ScrapedPage, error) {
 }
 
 // crawlURLWithBrowser renders a URL via ChromeDP and handles extraction & link discovery.
-func (c *Crawler) crawlURLWithBrowser(rawURL string, depth int) error {
+func (c *Crawler) crawlURLWithBrowser(rawURL string, depth int, parentURL string) error {
 	select {
 	case <-c.ctx.Done():
 		return c.ctx.Err()
@@ -212,7 +223,7 @@ func (c *Crawler) crawlURLWithBrowser(rawURL string, depth int) error {
 		return fmt.Errorf("failed to parse rendered HTML for %s: %w", rawURL, err)
 	}
 
-	page := c.extractPageFromDOM(targetURL, doc.Selection, res.StatusCode, res.ContentLength, depth)
+	page := c.extractPageFromDOM(targetURL, doc.Selection, res.StatusCode, res.ContentLength, depth, parentURL)
 	if res.Title != "" {
 		page.Title = res.Title
 	}
@@ -220,13 +231,13 @@ func (c *Crawler) crawlURLWithBrowser(rawURL string, depth int) error {
 		page.URL = rawURL
 	}
 
+	if !c.config.SitemapMode {
+		c.extractLinksFromDOM(doc.Selection, targetURL, depth)
+	}
+
 	c.addResult(page)
 	if c.onPageScraped != nil {
 		c.onPageScraped(page)
-	}
-
-	if !c.config.SitemapMode {
-		c.extractLinksFromDOM(doc.Selection, targetURL, depth)
 	}
 
 	if len(res.DiscoveredLinks) > 0 {

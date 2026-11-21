@@ -17,6 +17,61 @@ type ExtractionResult struct {
 
 // ─── Apply methods (layered fill — never overwrite non-empty fields) ─────────
 
+// applyStructuredData fills product fields from normalized StructuredData.
+func (r *ExtractionResult) applyStructuredData(sd *models.StructuredData) {
+	if sd == nil {
+		return
+	}
+	p := r.Product
+
+	if p.Name == "" {
+		p.Name = sd.Name
+	}
+	if p.Description == "" {
+		p.Description = truncate(sd.Description, 1000)
+	}
+	if p.SKU == "" {
+		p.SKU = sd.SKU
+	}
+	if p.GTIN == "" {
+		p.GTIN = sd.GTIN
+	}
+	if p.MPN == "" {
+		p.MPN = sd.MPN
+	}
+	if p.Brand == "" {
+		p.Brand = sd.Brand
+	}
+	if p.Price == 0 {
+		p.Price = sd.Price
+	}
+	if p.Currency == "" {
+		p.Currency = sd.Currency
+	}
+	if p.Availability == "" {
+		p.Availability = sd.Availability
+	}
+	p.InStock = sd.InStock
+	if p.Rating == 0 {
+		p.Rating = sd.Rating
+	}
+	if p.ReviewCount == 0 {
+		p.ReviewCount = sd.ReviewCount
+	}
+	if p.Category == "" {
+		p.Category = sd.Category
+	}
+	if len(p.Categories) == 0 && len(sd.Breadcrumbs) > 0 {
+		p.Categories = sd.Breadcrumbs
+	}
+	if len(p.Images) == 0 && len(sd.Images) > 0 {
+		p.Images = sd.Images
+	}
+	if len(p.Specs) == 0 && len(sd.Specs) > 0 {
+		p.Specs = sd.Specs
+	}
+}
+
 // applyJSONLD fills product fields from JSON-LD structured data.
 func (r *ExtractionResult) applyJSONLD(ld *jsonLDProduct) {
 	if ld == nil {
