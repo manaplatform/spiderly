@@ -9,6 +9,10 @@ import (
 	"time"
 
 	"spiderly/internal/core"
+	"spiderly/internal/engine"
+	"spiderly/internal/models"
+	"spiderly/internal/output"
+	"spiderly/internal/report"
 
 	"github.com/spf13/cobra"
 )
@@ -21,7 +25,7 @@ func newCrawlCmd() *cobra.Command {
 		concurrency    int
 		delay          time.Duration
 		timeout        time.Duration
-		output         string
+		outputPath     string
 		verbose        bool
 		noColor        bool
 		forceRecursive bool
@@ -49,6 +53,15 @@ func newCrawlCmd() *cobra.Command {
 		extractImages   bool
 		excludePatterns []string
 		proxyValues     []string
+
+		sortBy           string
+		filterCategory   string
+		filterMinPrice   float64
+		filterMaxPrice   float64
+		filterInStock    bool
+		filterHasProduct bool
+		filterKeyword    string
+		markdownOutput   string
 	)
 
 	cmd := &cobra.Command{
@@ -154,26 +167,112 @@ Examples:
 				CompiledNewsPattern:    compiledNewsPattern,
 			}
 
-			engine := core.NewCore(cfg)
+			coreEngine := core.NewCore(cfg)
 
-			results, err := engine.Run()
+			results, err := coreEngine.Run()
 			if err != nil {
 				return fmt.Errorf("crawl failed: %w", err)
 			}
 
-			export := core.ToScrapedPageResults(results)
+			// 1. Build crawl tree & enrich pages
+			tree := engine.BuildTree(results, targetURL)
+
+			// 2. Apply filtering if requested
+			var filterOpts engine.FilterOptions
+			hasFilter := false
+			if filterCategory != "" {
+				filterOpts.Category = filterCategory
+				hasFilter = true
+			}
+			if filterMinPrice > 0 {
+				filterOpts.MinPrice = &filterMinPrice
+				hasFilter = true
+			}
+			if filterMaxPrice > 0 {
+				filterOpts.MaxPrice = &filterMaxPrice
+				hasFilter = true
+			}
+			if filterInStock {
+				filterOpts.InStockOnly = true
+				hasFilter = true
+			}
+			if filterHasProduct {
+				filterOpts.HasProduct = true
+				hasFilter = true
+			}
+			if filterKeyword != "" {
+				filterOpts.Keywords = []string{filterKeyword}
+				hasFilter = true
+			}
+
+			if hasFilter {
+				tree = engine.FilterTree(tree, filterOpts)
+			}
+
+			// 3. Sort nodes
+			sortMode := engine.ParseSortMode(sortBy)
+			sortedNodes := engine.SortNodes(tree.FlattenDFS(), sortMode, tree)
+
+			processedPages := make([]models.ScrapedPage, 0, len(sortedNodes))
+			for _, n := range sortedNodes {
+				if n.Page != nil {
+					processedPages = append(processedPages, *n.Page)
+				}
+			}
+
+			// 4. Generate Markdown report if requested
+			if markdownOutput != "" {
+				prodSummary := tree.GetProductSummary()
+				crawlReport := report.CrawlReport{
+					Meta: report.Meta{
+						StartURL:  targetURL,
+						CrawlTime: time.Now().Format("2006-01-02 15:04:05"),
+					},
+					Statistics: report.Statistics{
+						TotalPages:    len(processedPages),
+						TotalProducts: prodSummary.TotalProducts,
+						InStockCount:  prodSummary.InStockCount,
+						MaxDepth:      maxDepth,
+					},
+					Categories:    tree.GetCategorySummary(),
+					ProductStats:  &prodSummary,
+					HierarchyTree: tree.Root,
+					TreeASCII:     tree.RenderASCIITree(),
+					Pages:         make([]report.Page, len(processedPages)),
+				}
+				for i, p := range processedPages {
+					crawlReport.Pages[i] = report.Page{
+						URL:            p.URL,
+						Title:          p.Title,
+						StatusCode:     p.StatusCode,
+						Depth:          p.Depth,
+						ParentURL:      p.ParentURL,
+						Category:       p.Category,
+						Breadcrumbs:    p.Breadcrumbs,
+						PageType:       p.PageType,
+						Product:        p.Product,
+						StructuredData: p.StructuredData,
+					}
+				}
+				if err := output.WriteMarkdownFile(markdownOutput, crawlReport, fmt.Sprintf("Spiderly Crawl Report: %s", targetURL)); err != nil {
+					return fmt.Errorf("failed to write markdown report: %w", err)
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "wrote markdown report to %s\n", markdownOutput)
+			}
+
+			export := core.ToScrapedPageResults(processedPages)
 
 			data, err := json.MarshalIndent(export, "", "  ")
 			if err != nil {
 				return fmt.Errorf("failed to encode results: %w", err)
 			}
 
-			if output == "" || output == "-" {
+			if outputPath == "" || outputPath == "-" {
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
 				return err
 			}
 
-			if err := os.WriteFile(output, data, 0o644); err != nil {
+			if err := os.WriteFile(outputPath, data, 0o644); err != nil {
 				return fmt.Errorf("failed to write output file: %w", err)
 			}
 
@@ -181,7 +280,7 @@ Examples:
 				cmd.OutOrStdout(),
 				"crawl complete: wrote %d pages to %s\n",
 				len(export),
-				output,
+				outputPath,
 			)
 			return err
 		},
@@ -195,7 +294,7 @@ Examples:
 	cmd.Flags().DurationVar(&timeout, "timeout", 30*time.Second, "request timeout")
 	cmd.Flags().Float64Var(&minPriority, "min-priority", 0, "minimum sitemap priority filter")
 	cmd.Flags().StringVar(&urlPattern, "url-pattern", "", "regex filter for sitemap URLs")
-	cmd.Flags().BoolVar(&forceRecursive, "force-recursive", false, "force recursive crawling and skip sitemap discovery")
+	cmd.Flags().BoolVarP(&forceRecursive, "force-recursive", "r", false, "force recursive crawling and skip sitemap discovery")
 	cmd.Flags().BoolVar(&headless, "headless", false, "enable headless browser rendering via ChromeDP")
 	cmd.Flags().BoolVar(&browserVisible, "browser-visible", false, "show browser window instead of headless (useful for debugging)")
 	cmd.Flags().DurationVar(&browserTimeout, "browser-timeout", 0, "browser rendering and navigation timeout (defaults to --timeout)")
@@ -205,7 +304,16 @@ Examples:
 	cmd.Flags().IntVar(&maxClicksPerPage, "max-clicks-per-page", 10, "maximum interactive elements to click per page")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose logging")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "disable colored console output")
-	cmd.Flags().StringVarP(&output, "output", "o", "crawl.json", "output file path, use '-' for stdout")
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "crawl.json", "output file path, use '-' for stdout")
+
+	cmd.Flags().StringVar(&sortBy, "sort-by", "hierarchy", "sort pages by: hierarchy, category, price, price-desc, title, depth, date, rating")
+	cmd.Flags().StringVar(&filterCategory, "filter-category", "", "filter pages matching category")
+	cmd.Flags().Float64Var(&filterMinPrice, "filter-min-price", 0, "filter products with minimum price")
+	cmd.Flags().Float64Var(&filterMaxPrice, "filter-max-price", 0, "filter products with maximum price")
+	cmd.Flags().BoolVar(&filterInStock, "filter-in-stock", false, "filter only in-stock products")
+	cmd.Flags().BoolVar(&filterHasProduct, "filter-has-product", false, "filter only pages containing products")
+	cmd.Flags().StringVar(&filterKeyword, "filter-keyword", "", "filter pages matching keyword in title, body, or product name")
+	cmd.Flags().StringVarP(&markdownOutput, "markdown", "m", "", "file path to write hierarchical Markdown report")
 
 	cmd.Flags().BoolVar(&enableChunker, "chunked", false, "enable chunked sitemap processing")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 50, "number of URLs per chunk when chunker is enabled")

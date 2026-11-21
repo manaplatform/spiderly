@@ -14,7 +14,26 @@ Spiderly is a fast, flexible command-line web crawler designed for deep site exp
 ## ✨ Features
 
 ### Crawling & discovery
-- Guide Spiderly with sitemap seeds or recursive link-following while tuning depth, timeout, and delay to suit each target URL. Optional priority and URL filters plus the `-recursive` override help you balance auto-discovery with deep traversal. [`cmd/main.go:23-52`]
+- Guide Spiderly with sitemap seeds or recursive link-following while tuning depth, timeout, and delay to suit each target URL. Full recursive crawl tracks parent-to-child lineage, discovers links continuously, and respects `robots.txt` and depth limits. Optional priority and URL filters plus the `-r` / `--force-recursive` override help you balance auto-discovery with deep traversal.
+
+### Smart Hierarchy & Site Understanding
+- Preserves the full crawl tree (`parent_url` → `child_urls`), mapping parent-child relationships and site structure.
+- Multi-signal page classifier categorizes and segments pages via schema.org `BreadcrumbList`, HTML breadcrumbs, URL path decomposition, and parent inheritance.
+- Visual ASCII/Unicode site tree generation for immediate structural understanding in console and Markdown.
+
+### Structured Data Extraction (JSON-LD & Schema.org)
+- Automatically parses and normalizes JSON-LD structured data on all pages (single objects, arrays, and `@graph` containers).
+- Extracts and standardizes:
+  - Product `name`, `description`, `brand`, `sku`, `gtin`, `mpn`, `productID`, `isbn`
+  - `offers` and `aggregateOffer`: price normalization (numbers and currency strings), currency codes, and availability statuses (`InStock`, `OutOfStock`, `PreOrder`, etc.)
+  - `aggregateRating`: rating values and review counts
+  - `BreadcrumbList`: complete category hierarchy
+  - `article` / `newsArticle`: headlines, author, and publication dates
+
+### Smart Sorting & Filtering Engine
+- Post-crawl query engine supports filtering by category, price range, in-stock availability, product existence, depth, or keywords.
+- Flexible sorting by `hierarchy` (DFS tree order), `category`, `price`, `price-desc`, `title`, `depth`, `date`, or `rating`.
+- Generates clean, executive-ready Markdown reports with visual ASCII trees, category breakdown tables, and structured product catalogs, as well as full-fidelity JSON.
 
 ### Parallel chunked processing
 - Chunked mode splits the crawl into batches so multiple workers (`--chunk-size`, `--max-workers`) can fetch pages concurrently while respecting per-worker concurrency, delays, and timeouts.
@@ -90,9 +109,16 @@ spiderly -url <target> [options]
 | `--news-mode`        | `false`       | Enable news/article extraction mode                                       |
 | `--news-pattern`     | —             | Custom regex for news/article URLs                                        |
 | `--news-sitemaps`    | —             | Preferred sitemap keywords for news mode (e.g. `news,press`)             |
-| `-output`            | —             | File path for JSON output                                                 |
-| `-markdown`          | —             | File path for Markdown report output                                      |
-| `-recursive`         | `false`       | Force recursive crawl (skip sitemap discovery)                            |
+| `-output`, `-o`      | `crawl.json`  | File path for JSON output                                                 |
+| `-markdown`, `-m`    | —             | File path for hierarchical Markdown report                                |
+| `-r`, `--force-recursive` | `false`   | Force recursive crawl (skip sitemap discovery)                            |
+| `--sort-by`          | `hierarchy`   | Sort pages: `hierarchy`, `category`, `price`, `price-desc`, `title`, `depth`, `date`, `rating` |
+| `--filter-category`  | —             | Filter pages matching category substring                                  |
+| `--filter-min-price` | `0`           | Minimum product price filter                                              |
+| `--filter-max-price` | `0`           | Maximum product price filter                                              |
+| `--filter-in-stock`  | `false`       | Filter only in-stock products                                             |
+| `--filter-has-product` | `false`     | Filter only pages with structured product data                            |
+| `--filter-keyword`   | —             | Filter pages matching keyword in title, body, or product                 |
 | `-verbose`           | `false`       | Enable verbose / debug logging                                            |
 | `-no-color`          | `false`       | Disable colored terminal output                                           |
 | `--headless`         | `false`       | Enable headless browser rendering via ChromeDP                            |

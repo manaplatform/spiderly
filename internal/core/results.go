@@ -63,12 +63,17 @@ type ScrapedPageResult struct {
 	LinksCount    int       `json:"links_count"`
 	ImagesCount   int       `json:"images_count"`
 	Depth         int       `json:"depth"`
+	ParentURL     string    `json:"parent_url,omitempty"`
+	ChildURLs     []string  `json:"child_urls,omitempty"`
+	Category      string    `json:"category,omitempty"`
+	Breadcrumbs   []string  `json:"breadcrumbs,omitempty"`
 	PageType      string    `json:"page_type,omitempty"`
 	ScrapedAt     time.Time `json:"scraped_at"`
 
-	// Product data (populated when ProductMode is enabled)
-	Product *ProductResult `json:"product,omitempty"`
-	News    *NewsResult    `json:"news,omitempty"`
+	// Product data (populated when ProductMode is enabled or detected)
+	Product        *ProductResult         `json:"product,omitempty"`
+	News           *NewsResult            `json:"news,omitempty"`
+	StructuredData *models.StructuredData `json:"structured_data,omitempty"`
 }
 
 // ─────────────────────────────────────────────
@@ -78,24 +83,29 @@ type ScrapedPageResult struct {
 // ToScrapedPageResult converts a single internal ScrapedPage to the export type.
 func ToScrapedPageResult(p models.ScrapedPage) ScrapedPageResult {
 	r := ScrapedPageResult{
-		URL:           p.URL,
-		Title:         p.Title,
-		H1:            p.H1,
-		Description:   p.Description,
-		Keywords:      p.Keywords,
-		Author:        p.Author,
-		PublishedDate: p.PublishedDate,
-		OGImage:       p.OGImage,
-		BodyText:      p.BodyText,
-		StatusCode:    p.StatusCode,
-		ContentType:   p.ContentType,
-		ContentLength: p.ContentLength,
-		LoadTimeMs:    p.LoadTimeMs,
-		LinksCount:    p.LinksCount,
-		ImagesCount:   p.ImagesCount,
-		Depth:         p.Depth,
-		PageType:      p.PageType,
-		ScrapedAt:     p.ScrapedAt,
+		URL:            p.URL,
+		Title:          p.Title,
+		H1:             p.H1,
+		Description:    p.Description,
+		Keywords:       p.Keywords,
+		Author:         p.Author,
+		PublishedDate:  p.PublishedDate,
+		OGImage:        p.OGImage,
+		BodyText:       p.BodyText,
+		StatusCode:     p.StatusCode,
+		ContentType:    p.ContentType,
+		ContentLength:  p.ContentLength,
+		LoadTimeMs:     p.LoadTimeMs,
+		LinksCount:     p.LinksCount,
+		ImagesCount:    p.ImagesCount,
+		Depth:          p.Depth,
+		ParentURL:      p.ParentURL,
+		ChildURLs:      p.ChildURLs,
+		Category:       p.Category,
+		Breadcrumbs:    p.Breadcrumbs,
+		PageType:       p.PageType,
+		ScrapedAt:      p.ScrapedAt,
+		StructuredData: p.StructuredData,
 	}
 
 	if p.Product != nil {

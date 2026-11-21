@@ -24,10 +24,17 @@ type ScrapedPage struct {
 	LinksCount    int    `json:"links_count"`
 	ImagesCount   int    `json:"images_count"`
 	Depth         int    `json:"depth"`
+	ParentURL     string `json:"parent_url,omitempty"`
+	ChildURLs     []string `json:"child_urls,omitempty"`
+	Category      string `json:"category,omitempty"`
+	Breadcrumbs   []string `json:"breadcrumbs,omitempty"`
 	Content       string `json:"content,omitempty"`
-	// Product data (when in product mode)
+	// Product data (when in product mode or detected)
 	Product *ProductInfo `json:"product,omitempty"`
 	News    *NewsData    `json:"news,omitempty"`
+
+	// Structured data extracted from JSON-LD / schema.org
+	StructuredData *StructuredData `json:"structured_data,omitempty"`
 
 	// Page type detection
 	PageType string `json:"page_type,omitempty"` // product, category, article, etc.
@@ -42,6 +49,57 @@ type PriceInfo struct {
 	Currency string  `json:"currency,omitempty"`
 	Seller   string  `json:"seller,omitempty"`
 	InStock  bool    `json:"in_stock"`
+}
+
+// StructuredData represents normalized structured data extracted from JSON-LD / schema.org.
+type StructuredData struct {
+	Type          string            `json:"type,omitempty"`
+	Name          string            `json:"name,omitempty"`
+	Description   string            `json:"description,omitempty"`
+	Brand         string            `json:"brand,omitempty"`
+	SKU           string            `json:"sku,omitempty"`
+	GTIN          string            `json:"gtin,omitempty"`
+	MPN           string            `json:"mpn,omitempty"`
+	Price         float64           `json:"price,omitempty"`
+	OriginalPrice float64           `json:"original_price,omitempty"`
+	Discount      float64           `json:"discount,omitempty"`
+	Currency      string            `json:"currency,omitempty"`
+	Availability  string            `json:"availability,omitempty"`
+	InStock       bool              `json:"in_stock"`
+	Rating        float64           `json:"rating,omitempty"`
+	ReviewCount   int               `json:"review_count,omitempty"`
+	Category      string            `json:"category,omitempty"`
+	Breadcrumbs   []string          `json:"breadcrumbs,omitempty"`
+	Images        []string          `json:"images,omitempty"`
+	Specs         map[string]string `json:"specs,omitempty"`
+	RawTypes      []string          `json:"raw_types,omitempty"`
+}
+
+// ToProductInfo converts StructuredData to a ProductInfo model.
+func (sd *StructuredData) ToProductInfo() *ProductInfo {
+	if sd == nil {
+		return nil
+	}
+	return &ProductInfo{
+		Name:          sd.Name,
+		Price:         sd.Price,
+		OriginalPrice: sd.OriginalPrice,
+		Discount:      sd.Discount,
+		Currency:      sd.Currency,
+		Description:   sd.Description,
+		SKU:           sd.SKU,
+		GTIN:          sd.GTIN,
+		MPN:           sd.MPN,
+		Brand:         sd.Brand,
+		Availability:  sd.Availability,
+		InStock:       sd.InStock,
+		Rating:        sd.Rating,
+		ReviewCount:   sd.ReviewCount,
+		Category:      sd.Category,
+		Categories:    sd.Breadcrumbs,
+		Specs:         sd.Specs,
+		Images:        sd.Images,
+	}
 }
 
 // CrawlStats tracks crawl progress

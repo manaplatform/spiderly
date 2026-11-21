@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"spiderly/internal/core"
+	"spiderly/internal/engine"
 	"spiderly/internal/output"
 	"spiderly/internal/report"
 
@@ -136,29 +137,52 @@ func newRunCmd() *cobra.Command {
 				Proxies:          resolvedProxies,
 			}
 
-			engine := core.NewCore(cfg)
+			coreEngine := core.NewCore(cfg)
 
 			step("Starting crawler", fmt.Sprintf("target=%s headless=%v", targetURL, headless))
-			results, err := engine.Run()
+			results, err := coreEngine.Run()
 			if err != nil {
 				return fmt.Errorf("crawl failed: %w", err)
 			}
 
 			step("Analyzing results", fmt.Sprintf("processing %d crawled pages", len(results)))
+			tree := engine.BuildTree(results, targetURL)
+			dfsNodes := tree.FlattenDFS()
+			prodStats := tree.GetProductSummary()
+
 			crawlReport := report.CrawlReport{
 				Meta: report.Meta{
-					StartURL: targetURL,
+					StartURL:  targetURL,
+					CrawlTime: time.Now().Format("2006-01-02 15:04:05"),
 				},
 				Statistics: report.Statistics{
-					TotalPages: len(results),
+					TotalPages:    len(dfsNodes),
+					TotalProducts: prodStats.TotalProducts,
+					InStockCount:  prodStats.InStockCount,
+					MaxDepth:      maxDepth,
 				},
-				Pages: make([]report.Page, len(results)),
+				Categories:    tree.GetCategorySummary(),
+				ProductStats:  &prodStats,
+				HierarchyTree: tree.Root,
+				TreeASCII:     tree.RenderASCIITree(),
+				Pages:         make([]report.Page, len(dfsNodes)),
 			}
-			for i, p := range results {
+			for i, n := range dfsNodes {
+				p := n.Page
+				if p == nil {
+					continue
+				}
 				crawlReport.Pages[i] = report.Page{
-					URL:        p.URL,
-					Title:      p.Title,
-					StatusCode: p.StatusCode,
+					URL:            p.URL,
+					Title:          p.Title,
+					StatusCode:     p.StatusCode,
+					Depth:          p.Depth,
+					ParentURL:      p.ParentURL,
+					Category:       p.Category,
+					Breadcrumbs:    p.Breadcrumbs,
+					PageType:       p.PageType,
+					Product:        p.Product,
+					StructuredData: p.StructuredData,
 				}
 			}
 

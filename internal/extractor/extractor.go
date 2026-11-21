@@ -21,9 +21,9 @@ func ExtractProduct(doc *goquery.Selection, pageURL string, opts ProductOptions)
 	}
 
 	// 1. Try JSON-LD (highest confidence)
-	if ld := extractFromJSONLD(doc); ld != nil {
+	if sd := ExtractJSONLD(doc); sd != nil && (sd.Name != "" || sd.Price > 0 || sd.SKU != "") {
 		result.Source = "json-ld"
-		result.applyJSONLD(ld)
+		result.applyStructuredData(sd)
 	}
 
 	// 2. Fill missing fields from Open Graph

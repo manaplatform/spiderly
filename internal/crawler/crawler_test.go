@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"spiderly/internal/models"
 )
 
 func TestCrawler_HeadlessAlways(t *testing.T) {
@@ -215,5 +217,138 @@ func TestCrawler_ClickCrawl(t *testing.T) {
 
 	if !foundClickedTarget {
 		t.Errorf("expected /clicked-link to be discovered via click-crawl and scraped")
+	}
+}
+
+func TestCrawler_RecursiveHierarchyAndLineage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		switch r.URL.Path {
+		case "/":
+			fmt.Fprint(w, `<!DOCTYPE html>
+<html>
+<head><title>Home Root</title></head>
+<body>
+<h1>Welcome to Shop</h1>
+<a href="/category/electronics">Electronics</a>
+</body>
+</html>`)
+		case "/category/electronics":
+			fmt.Fprint(w, `<!DOCTYPE html>
+<html>
+<head><title>Electronics Section</title></head>
+<body>
+<h1>Electronics</h1>
+<a href="/category/electronics/laptop-1">Pro Laptop</a>
+</body>
+</html>`)
+		case "/category/electronics/laptop-1":
+			fmt.Fprint(w, `<!DOCTYPE html>
+<html>
+<head>
+<title>Pro Laptop</title>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Product",
+  "name": "Pro Ultra Laptop",
+  "sku": "LAP-999",
+  "offers": {
+    "@type": "Offer",
+    "price": "1299.99",
+    "priceCurrency": "USD",
+    "availability": "https://schema.org/InStock"
+  }
+}
+</script>
+</head>
+<body>
+<h1>Pro Ultra Laptop</h1>
+<p>Top performance.</p>
+</body>
+</html>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := DefaultConfig()
+	cfg.Headless = false
+	cfg.MaxDepth = 3
+	cfg.MaxPages = 10
+	cfg.Delay = 0
+
+	crwl, err := NewCrawler(cfg)
+	if err != nil {
+		t.Fatalf("failed to create crawler: %v", err)
+	}
+
+	results, err := crwl.Crawl(server.URL)
+	if err != nil {
+		t.Fatalf("crawl failed: %v", err)
+	}
+
+	if len(results) < 3 {
+		t.Fatalf("expected 3 pages scraped, got %d", len(results))
+	}
+
+	pagesByURL := make(map[string]models.ScrapedPage)
+	for _, p := range results {
+		// Store by path for easier matching
+		if strings.HasSuffix(p.URL, "/category/electronics/laptop-1") {
+			pagesByURL["laptop"] = p
+		} else if strings.HasSuffix(p.URL, "/category/electronics") {
+			pagesByURL["category"] = p
+		} else {
+			pagesByURL["root"] = p
+		}
+	}
+
+	rootPage, ok := pagesByURL["root"]
+	if !ok {
+		t.Fatalf("root page not found in results")
+	}
+	if rootPage.Depth != 0 {
+		t.Errorf("expected root page depth=0, got %d", rootPage.Depth)
+	}
+
+	catPage, ok := pagesByURL["category"]
+	if !ok {
+		t.Fatalf("category page not found in results")
+	}
+	if catPage.Depth != 1 {
+		t.Errorf("expected category page depth=1, got %d", catPage.Depth)
+	}
+	if !strings.HasPrefix(catPage.ParentURL, server.URL) {
+		t.Errorf("expected category parent to be root URL %s, got %s", server.URL, catPage.ParentURL)
+	}
+
+	laptopPage, ok := pagesByURL["laptop"]
+	if !ok {
+		t.Fatalf("laptop page not found in results")
+	}
+	if laptopPage.Depth != 2 {
+		t.Errorf("expected laptop page depth=2, got %d", laptopPage.Depth)
+	}
+	if !strings.Contains(laptopPage.ParentURL, "/category/electronics") {
+		t.Errorf("expected laptop parent to be category URL, got %s", laptopPage.ParentURL)
+	}
+
+	// Verify structured data auto-extraction
+	if laptopPage.StructuredData == nil {
+		t.Fatalf("expected StructuredData on laptop page, got nil")
+	}
+	if laptopPage.StructuredData.Name != "Pro Ultra Laptop" {
+		t.Errorf("expected StructuredData name 'Pro Ultra Laptop', got %q", laptopPage.StructuredData.Name)
+	}
+	if laptopPage.StructuredData.Price != 1299.99 {
+		t.Errorf("expected StructuredData price 1299.99, got %f", laptopPage.StructuredData.Price)
+	}
+	if laptopPage.Product == nil {
+		t.Fatalf("expected Product on laptop page, got nil")
+	}
+	if laptopPage.Product.Name != "Pro Ultra Laptop" {
+		t.Errorf("expected Product name 'Pro Ultra Laptop', got %q", laptopPage.Product.Name)
 	}
 }
