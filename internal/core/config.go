@@ -58,6 +58,11 @@ type CoreConfig struct {
 	// ── Behavior flags ──
 	ForceRecursive bool     `json:"force_recursive"`
 	Headless       bool     `json:"headless"`
+	BrowserVisible   bool          `json:"browser_visible"`
+	BrowserTimeout   time.Duration `json:"browser_timeout"`
+	BrowserStrategy  string        `json:"browser_strategy"`
+	ClickCrawl       bool          `json:"click_crawl"`
+	MaxClicksPerPage int           `json:"max_clicks_per_page"`
 	Verbose        bool     `json:"verbose"`
 	NoColor        bool     `json:"no_color"`
 	Proxies        []string `json:"proxies,omitempty"`
@@ -162,6 +167,8 @@ func NewCoreConfig(targetURL string, opts ...Option) (*CoreConfig, error) {
 		SinkType:            SinkMemory,
 		SinkBuffer:          DefaultSinkBuffer,
 		UserAgent:           "Spiderly/1.0 (+https://github.com/spiderly)",
+		BrowserStrategy:     "always",
+		MaxClicksPerPage:    10,
 	}
 
 	// Apply functional options
@@ -273,6 +280,43 @@ func WithForceRecursive(v bool) Option {
 // WithHeadless enables headless browser rendering.
 func WithHeadless(v bool) Option {
 	return func(c *CoreConfig) { c.Headless = v }
+}
+
+// WithBrowserVisible configures browser to run with a visible window (non-headless) for debugging.
+func WithBrowserVisible(v bool) Option {
+	return func(c *CoreConfig) { c.BrowserVisible = v }
+}
+
+// WithBrowserTimeout sets the browser render/navigation timeout.
+func WithBrowserTimeout(d time.Duration) Option {
+	return func(c *CoreConfig) {
+		if d > 0 {
+			c.BrowserTimeout = d
+		}
+	}
+}
+
+// WithBrowserStrategy sets the browser execution strategy ("always" or "fallback").
+func WithBrowserStrategy(s string) Option {
+	return func(c *CoreConfig) {
+		if s != "" {
+			c.BrowserStrategy = s
+		}
+	}
+}
+
+// WithClickCrawl enables click-based link discovery on interactive elements.
+func WithClickCrawl(v bool) Option {
+	return func(c *CoreConfig) { c.ClickCrawl = v }
+}
+
+// WithMaxClicksPerPage sets the maximum interactive elements to click per page.
+func WithMaxClicksPerPage(n int) Option {
+	return func(c *CoreConfig) {
+		if n >= 0 {
+			c.MaxClicksPerPage = n
+		}
+	}
 }
 
 // WithVerbose enables verbose logging output.
@@ -483,6 +527,13 @@ func (cfg *CoreConfig) Validate() error {
 		return NewConfigError("sink_path", "file sink requires a path")
 	}
 
+	if cfg.MaxClicksPerPage < 0 {
+		return NewConfigError("max_clicks_per_page", "must be >= 0")
+	}
+	if cfg.BrowserStrategy != "" && cfg.BrowserStrategy != "always" && cfg.BrowserStrategy != "fallback" {
+		return NewConfigError("browser_strategy", "must be 'always' or 'fallback'")
+	}
+
 	return nil
 }
 
@@ -602,6 +653,9 @@ func (cfg *CoreConfig) String() string {
 	fmt.Fprintf(&b, "  RobotsTxt:   %v\n", cfg.RespectRobotsTxt)
 	fmt.Fprintf(&b, "  Normalize:   %v\n", cfg.EnableNormalization)
 	fmt.Fprintf(&b, "  Sink:        %s\n", cfg.SinkType)
+	if cfg.Headless {
+		fmt.Fprintf(&b, "  Headless:    true (strategy: %s, visible: %v, click-crawl: %v)\n", cfg.BrowserStrategy, cfg.BrowserVisible, cfg.ClickCrawl)
+	}
 	if cfg.ProductMode {
 		fmt.Fprintf(&b, "  ProductMode: true\n")
 		if cfg.ProductPattern != "" {

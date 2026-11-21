@@ -195,6 +195,17 @@ func (c *Core) ApplyConfig(cfg CoreConfig) {
 	// Boolean flags — always apply (no "zero value" ambiguity for bools)
 	c.config.ForceRecursive = cfg.ForceRecursive
 	c.config.Headless = cfg.Headless
+	c.config.BrowserVisible = cfg.BrowserVisible
+	c.config.ClickCrawl = cfg.ClickCrawl
+	if cfg.BrowserTimeout > 0 {
+		c.config.BrowserTimeout = cfg.BrowserTimeout
+	}
+	if cfg.BrowserStrategy != "" {
+		c.config.BrowserStrategy = cfg.BrowserStrategy
+	}
+	if cfg.MaxClicksPerPage > 0 {
+		c.config.MaxClicksPerPage = cfg.MaxClicksPerPage
+	}
 	c.config.Verbose = cfg.Verbose
 	c.config.NoColor = cfg.NoColor
 	c.config.EnableChunker = cfg.EnableChunker

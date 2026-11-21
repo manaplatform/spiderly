@@ -26,6 +26,12 @@ func newCrawlCmd() *cobra.Command {
 		noColor        bool
 		forceRecursive bool
 		headless       bool
+		browserVisible   bool
+		browserTimeout   time.Duration
+		browserStrategy  string
+		clickCrawl       bool
+		clickFallback    bool
+		maxClicksPerPage int
 		minPriority    float64
 		urlPattern     string
 
@@ -79,6 +85,21 @@ Examples:
 				return fmt.Errorf("--product-mode and --news-mode cannot both be enabled")
 			}
 
+			if clickFallback {
+				clickCrawl = true
+				headless = true
+				browserStrategy = "fallback"
+			} else if clickCrawl && !headless {
+				headless = true
+			}
+
+			if browserTimeout <= 0 {
+				browserTimeout = timeout
+			}
+			if browserStrategy == "" {
+				browserStrategy = "always"
+			}
+
 			var compiledProductPattern *regexp.Regexp
 			if productPattern != "" {
 				re, err := regexp.Compile(productPattern)
@@ -109,6 +130,11 @@ Examples:
 				URLPattern:             urlPattern,
 				ForceRecursive:         forceRecursive,
 				Headless:               headless,
+				BrowserVisible:         browserVisible,
+				BrowserTimeout:         browserTimeout,
+				BrowserStrategy:        browserStrategy,
+				ClickCrawl:             clickCrawl,
+				MaxClicksPerPage:       maxClicksPerPage,
 				Verbose:                verbose,
 				NoColor:                noColor,
 				EnableChunker:          enableChunker,
@@ -170,7 +196,13 @@ Examples:
 	cmd.Flags().Float64Var(&minPriority, "min-priority", 0, "minimum sitemap priority filter")
 	cmd.Flags().StringVar(&urlPattern, "url-pattern", "", "regex filter for sitemap URLs")
 	cmd.Flags().BoolVar(&forceRecursive, "force-recursive", false, "force recursive crawling and skip sitemap discovery")
-	cmd.Flags().BoolVar(&headless, "headless", false, "enable headless mode")
+	cmd.Flags().BoolVar(&headless, "headless", false, "enable headless browser rendering via ChromeDP")
+	cmd.Flags().BoolVar(&browserVisible, "browser-visible", false, "show browser window instead of headless (useful for debugging)")
+	cmd.Flags().DurationVar(&browserTimeout, "browser-timeout", 0, "browser rendering and navigation timeout (defaults to --timeout)")
+	cmd.Flags().StringVar(&browserStrategy, "browser-strategy", "always", "browser rendering strategy: 'always' (render all pages in ChromeDP) or 'fallback' (Colly fast path, ChromeDP when JS is required)")
+	cmd.Flags().BoolVar(&clickCrawl, "click-crawl", false, "enable click-based link discovery for interactive elements (buttons, SPA nav, load more)")
+	cmd.Flags().BoolVar(&clickFallback, "click-fallback", false, "convenience shortcut: enables headless + click-crawl with fallback strategy")
+	cmd.Flags().IntVar(&maxClicksPerPage, "max-clicks-per-page", 10, "maximum interactive elements to click per page")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose logging")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "disable colored console output")
 	cmd.Flags().StringVarP(&output, "output", "o", "crawl.json", "output file path, use '-' for stdout")
@@ -223,6 +255,12 @@ Examples:
     --chunked \
     --chunk-size 100 \
     --max-workers 8
+
+  spiderly crawl https://app.example.com --headless
+
+  spiderly crawl https://spa.example.com --headless --click-crawl --max-clicks-per-page 15
+
+  spiderly crawl https://example.com --click-fallback
 
   spiderly crawl https://example.com \
     --proxy http://127.0.0.1:8080

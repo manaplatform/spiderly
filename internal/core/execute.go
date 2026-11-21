@@ -161,8 +161,14 @@ func (c *Core) executeSitemapCrawl(baseURL string, entries []models.SitemapEntry
 		ProductPattern: c.config.CompiledProductPattern,
 		ExtractSpecs:   c.config.ExtractSpecs,
 		ExtractImages:  c.config.ExtractImages,
-		NewsMode:       c.config.NewsMode,
-		NewsPattern:    c.config.CompiledNewsPattern,
+		NewsMode:         c.config.NewsMode,
+		NewsPattern:      c.config.CompiledNewsPattern,
+		Headless:         c.config.Headless,
+		BrowserVisible:   c.config.BrowserVisible,
+		BrowserTimeout:   c.config.BrowserTimeout,
+		BrowserStrategy:  c.config.BrowserStrategy,
+		ClickCrawl:       c.config.ClickCrawl,
+		MaxClicksPerPage: c.config.MaxClicksPerPage,
 	})
 	if err != nil {
 		return nil, NewCrawlError(ErrKindConfig, baseURL, err).
@@ -218,8 +224,14 @@ func (c *Core) executeRecursiveCrawl(targetURL string) ([]models.ScrapedPage, er
 		ProductPattern: c.config.CompiledProductPattern,
 		ExtractSpecs:   c.config.ExtractSpecs,
 		ExtractImages:  c.config.ExtractImages,
-		NewsMode:       c.config.NewsMode,
-		NewsPattern:    c.config.CompiledNewsPattern,
+		NewsMode:         c.config.NewsMode,
+		NewsPattern:      c.config.CompiledNewsPattern,
+		Headless:         c.config.Headless,
+		BrowserVisible:   c.config.BrowserVisible,
+		BrowserTimeout:   c.config.BrowserTimeout,
+		BrowserStrategy:  c.config.BrowserStrategy,
+		ClickCrawl:       c.config.ClickCrawl,
+		MaxClicksPerPage: c.config.MaxClicksPerPage,
 	})
 	if err != nil {
 		return nil, NewCrawlError(ErrKindConfig, targetURL, err).
@@ -264,7 +276,6 @@ func (c *Core) executeChunkedSitemapCrawl(baseURL string, entries []models.Sitem
 		Concurrency:    c.config.Concurrency,
 		Delay:          c.effectiveDelay(),
 		Timeout:        c.config.Timeout,
-		Headless:       c.config.Headless,
 		Verbose:        c.config.Verbose,
 		NoColor:        c.config.NoColor,
 		Proxies:        c.config.Proxies,
@@ -272,8 +283,14 @@ func (c *Core) executeChunkedSitemapCrawl(baseURL string, entries []models.Sitem
 		ProductPattern: c.config.ProductPattern,
 		ExtractSpecs:   c.config.ExtractSpecs,
 		ExtractImages:  c.config.ExtractImages,
-		NewsMode:       c.config.NewsMode,
-		NewsPattern:    c.config.CompiledNewsPattern,
+		NewsMode:         c.config.NewsMode,
+		NewsPattern:      c.config.CompiledNewsPattern,
+		Headless:         c.config.Headless,
+		BrowserVisible:   c.config.BrowserVisible,
+		BrowserTimeout:   c.config.BrowserTimeout,
+		BrowserStrategy:  c.config.BrowserStrategy,
+		ClickCrawl:       c.config.ClickCrawl,
+		MaxClicksPerPage: c.config.MaxClicksPerPage,
 	})
 
 	c.chunker.OnPageScraped(func(page models.ScrapedPage, chunkID int) {

@@ -49,10 +49,15 @@ type Config struct {
 	MaxWorkers int // Max parallel workers/processes (default: 4)
 
 	// Crawler settings (applied to each worker)
-	Concurrency int           // Concurrent requests per worker
-	Delay       time.Duration // Delay between requests
-	Timeout     time.Duration // Request timeout
-	Headless    bool          // Use headless browser
+	Concurrency      int           // Concurrent requests per worker
+	Delay            time.Duration // Delay between requests
+	Timeout          time.Duration // Request timeout
+	Headless         bool          // Use headless browser
+	BrowserVisible   bool          // Show browser window
+	BrowserTimeout   time.Duration // Browser render timeout
+	BrowserStrategy  string        // Browser execution strategy
+	ClickCrawl       bool          // Enable click crawling
+	MaxClicksPerPage int           // Max interactive elements to click per page
 
 	// Product extraction settings
 	ProductMode    bool   // Enable product extraction mode
@@ -354,15 +359,21 @@ func (c *Chunker) processChunk(workerID int, chunk Chunk) WorkerResult {
 	// Create crawler for this chunk
 	// Create crawler for this chunk
 	crawlerCfg := crawler.Config{
-		MaxPages:    len(chunk.URLs),
-		MaxDepth:    1,
-		Concurrency: c.config.Concurrency,
-		Delay:       c.config.Delay,
-		Timeout:     c.config.Timeout,
-		SitemapMode: true,
-		ProductMode: c.config.ProductMode,
-		NewsMode:    c.config.NewsMode,
-		NewsPattern: c.config.NewsPattern,
+		MaxPages:         len(chunk.URLs),
+		MaxDepth:         1,
+		Concurrency:      c.config.Concurrency,
+		Delay:            c.config.Delay,
+		Timeout:          c.config.Timeout,
+		SitemapMode:      true,
+		ProductMode:      c.config.ProductMode,
+		NewsMode:         c.config.NewsMode,
+		NewsPattern:      c.config.NewsPattern,
+		Headless:         c.config.Headless,
+		BrowserVisible:   c.config.BrowserVisible,
+		BrowserTimeout:   c.config.BrowserTimeout,
+		BrowserStrategy:  c.config.BrowserStrategy,
+		ClickCrawl:       c.config.ClickCrawl,
+		MaxClicksPerPage: c.config.MaxClicksPerPage,
 	}
 
 	if len(c.config.Proxies) > 0 {

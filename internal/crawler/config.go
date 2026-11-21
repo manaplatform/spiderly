@@ -34,20 +34,30 @@ type Config struct {
 	// URL filtering
 	ExcludePatterns         []string
 	CompiledExcludePatterns []*regexp.Regexp
+
+	// Browser rendering & click crawling
+	Headless         bool
+	BrowserVisible   bool
+	BrowserTimeout   time.Duration
+	BrowserStrategy  string // "always" (default when headless=true) or "fallback"
+	ClickCrawl       bool
+	MaxClicksPerPage int
 }
 
 // DefaultConfig returns sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		MaxPages:      100,
-		MaxDepth:      3,
-		Concurrency:   5,
-		Delay:         200 * time.Millisecond,
-		Timeout:       30 * time.Second,
-		UserAgent:     "Spiderly/1.0",
-		Verbose:       false,
-		SitemapMode:   false,
-		RespectRobots: true,
+		MaxPages:         100,
+		MaxDepth:         3,
+		Concurrency:      5,
+		Delay:            200 * time.Millisecond,
+		Timeout:          30 * time.Second,
+		UserAgent:        "Spiderly/1.0",
+		Verbose:          false,
+		SitemapMode:      false,
+		RespectRobots:    true,
+		BrowserStrategy:  "always",
+		MaxClicksPerPage: 10,
 	}
 }
 
@@ -81,6 +91,13 @@ func (cfg *Config) Validate() error {
 		if parsed.Scheme == "" || parsed.Host == "" {
 			return fmt.Errorf("proxy URL must include scheme and host: %q", rawProxy)
 		}
+	}
+
+	if cfg.MaxClicksPerPage < 0 {
+		return fmt.Errorf("MaxClicksPerPage must be >= 0, got %d", cfg.MaxClicksPerPage)
+	}
+	if cfg.BrowserStrategy != "" && cfg.BrowserStrategy != "always" && cfg.BrowserStrategy != "fallback" {
+		return fmt.Errorf("BrowserStrategy must be 'always' or 'fallback', got %q", cfg.BrowserStrategy)
 	}
 
 	// Compile exclude patterns once

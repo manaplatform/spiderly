@@ -1,4 +1,5 @@
-# 🕷️ Spiderly
+![Spiderly Logo](logo.png)
+# Spiderly
 
 > A high-performance, concurrent web crawler and scraper built in Go.
 
@@ -90,6 +91,13 @@ spiderly -url <target> [options]
 | `-recursive`         | `false`       | Force recursive crawl (skip sitemap discovery)                            |
 | `-verbose`           | `false`       | Enable verbose / debug logging                                            |
 | `-no-color`          | `false`       | Disable colored terminal output                                           |
+| `--headless`         | `false`       | Enable headless browser rendering via ChromeDP                            |
+| `--browser-visible`   | `false`       | Show browser window instead of headless (useful for debugging)            |
+| `--browser-timeout`   | `30s`         | Browser page render and navigation timeout                                |
+| `--browser-strategy`  | `always`      | Browser rendering strategy: `always` (direct ChromeDP) or `fallback` (Colly fast path, ChromeDP when JS is required) |
+| `--click-crawl`       | `false`       | Enable click-based link discovery for interactive elements (buttons, SPA nav, load more) |
+| `--click-fallback`    | `false`       | Shortcut: enables headless + click-crawl with fallback strategy           |
+| `--max-clicks-per-page` | `10`        | Maximum interactive elements to click per page during click crawl         |
 ### Examples
 
 **Basic crawl with defaults:**
@@ -172,6 +180,44 @@ spiderly -url https://example.com -recursive -depth 5 -timeout 15s -concurrency 
 ---
 
 ## ⚙️ Configuration
+
+### Headless browser rendering & click crawler
+
+Spiderly integrates [ChromeDP](https://github.com/chromedp/chromedp) to render client-side JavaScript applications (React, Next.js, Vue, Angular, SPAs) and discover links that only appear after clicking interactive elements.
+
+#### Prerequisites
+Google Chrome or Chromium must be installed on your system. On macOS and Linux, Spiderly automatically detects standard installation paths. If Chrome is not installed or fails to launch, Spiderly logs a clear warning and gracefully falls back to the Colly HTTP engine.
+
+#### Browser Strategies & Fallback Policy
+1. **Always (`--headless` or `--browser-strategy=always`)**:
+   Every page is rendered directly through headless ChromeDP. Rendered DOM, HTTP status code, final redirected URL, and title are extracted and passed through the standard extraction pipeline.
+2. **Fallback (`--browser-strategy=fallback` or `--click-fallback`)**:
+   - **Step 1**: Fetch page using Colly (fast path).
+   - **Step 2**: Inspect the response with `DetectJSRequired`: checks for `<noscript>` tags requiring JS, empty SPA root containers (`#root`, `#app`, `#__next`), Cloudflare/bot challenge pages, or minimal body text with scripts.
+   - **Step 3**: If JS is required, automatically re-fetch the page using ChromeDP and replace the static shell with the rendered DOM.
+   - **Step 4**: If `--click-crawl` is enabled, run interactive element discovery.
+
+#### Click Crawler
+When `--click-crawl` is enabled, Spiderly inspects the rendered DOM for interactive elements (`button`, `[role="button"]`, links without usable `href`, pagination, "Load more" triggers). It clicks up to `--max-clicks-per-page` (default: 10), intercepts URL changes or newly inserted `<a>` tags, and enqueues them into the crawl queue within the configured domain and depth limits.
+
+#### Examples
+
+```bash
+# Render JS-heavy single-page applications with ChromeDP
+spiderly crawl https://app.example.com --headless
+
+# Use Colly fast path with ChromeDP fallback only when JS is detected
+spiderly crawl https://example.com --headless --browser-strategy=fallback
+
+# Crawl interactive pages and discover dynamically loaded links
+spiderly crawl https://spa.example.com --headless --click-crawl --max-clicks-per-page 15
+
+# Convenience shortcut for hybrid crawl + click discovery
+spiderly crawl https://example.com --click-fallback
+
+# Debug with a visible browser window
+spiderly crawl https://example.com --headless --browser-visible --browser-timeout 45s
+```
 
 ### Product mode & URL filters
 When `-product-mode` is enabled (or a custom `-product-pattern` is provided), Spiderly auto-enables chunked processing, increases default page, chunk, and worker counts, and uses a regex to identify product pages. You can also supply a direct sitemap (`-sitemap`), filter by minimum priority (`-min-priority`), or apply a URL filter (`-url-pattern`), or force recursive link-following with `-recursive`. [`cmd/main.go:44-51`][`cmd/main.go:68-96`]
