@@ -152,7 +152,7 @@ func BuildTree(pages []models.ScrapedPage, rootURL string) *CrawlTree {
 		}
 	}
 
-	// 5. Index by Category and Depth, and sort children
+	// 5. Index by Category and Depth, sort children, and assign clean ChildURLs to Page
 	for _, node := range tree.Nodes {
 		cat := node.Category
 		if cat == "" {
@@ -168,6 +168,19 @@ func BuildTree(pages []models.ScrapedPage, rootURL string) *CrawlTree {
 			}
 			return node.Children[i].URL < node.Children[j].URL
 		})
+
+		// Assign actual tree children to node.Page.ChildURLs
+		if node.Page != nil {
+			if len(node.Children) > 0 {
+				childURLs := make([]string, len(node.Children))
+				for idx, ch := range node.Children {
+					childURLs[idx] = ch.URL
+				}
+				node.Page.ChildURLs = childURLs
+			} else {
+				node.Page.ChildURLs = nil
+			}
+		}
 	}
 
 	return tree

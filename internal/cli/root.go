@@ -15,9 +15,9 @@ import (
 )
 
 var (
-	version = "v0.0.1"
+	version = "v0.0.2"
 	commit  = "none"
-	date    = "2026.11.21"
+	date    = "2026.11.22"
 )
 
 func SetBuildInfo(v, c, d string) {

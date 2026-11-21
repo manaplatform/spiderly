@@ -232,7 +232,7 @@ func (c *Crawler) crawlURLWithBrowser(rawURL string, depth int, parentURL string
 	}
 
 	if !c.config.SitemapMode {
-		page.ChildURLs = c.extractLinksFromDOM(doc.Selection, targetURL, depth)
+		c.extractLinksFromDOM(doc.Selection, targetURL, depth)
 	}
 
 	c.addResult(page)

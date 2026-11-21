@@ -116,7 +116,7 @@ func (c *Crawler) handlePage(e *colly.HTMLElement) {
 					}
 
 					if !c.config.SitemapMode {
-						renderedPage.ChildURLs = c.extractLinksFromDOM(doc.Selection, targetURL, reqDepth)
+						c.extractLinksFromDOM(doc.Selection, targetURL, reqDepth)
 					}
 					if len(res.DiscoveredLinks) > 0 {
 						c.enqueueDiscoveredLinks(res.DiscoveredLinks, reqDepth, targetURL)
@@ -142,7 +142,7 @@ func (c *Crawler) handlePage(e *colly.HTMLElement) {
 	page := c.extractPageFromDOM(pageURL, e.DOM, e.Response.StatusCode, int64(len(e.Response.Body)), reqDepth, parentURL)
 
 	if !c.config.SitemapMode {
-		page.ChildURLs = c.extractLinksFromDOM(e.DOM, pageURL, reqDepth)
+		c.extractLinksFromDOM(e.DOM, pageURL, reqDepth)
 	}
 
 	c.addResult(page)

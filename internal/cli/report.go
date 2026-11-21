@@ -171,26 +171,26 @@ Supports hierarchical site trees, category breakdowns, sorting, and multi-criter
 				if title == "" {
 					title = fmt.Sprintf("Spiderly Crawl Report: %s", startURL)
 				}
-				content, err := output.RenderMarkdown(finalReport, title)
-				if err != nil {
-					return err
-				}
 				if out == "" || out == "-" {
+					content, err := output.RenderMarkdown(finalReport, title)
+					if err != nil {
+						return err
+					}
 					fmt.Print(content)
 					return nil
 				}
-				return os.WriteFile(out, []byte(content), 0o644)
+				return output.WriteMarkdownFile(out, finalReport, title)
 
 			case "json":
-				content, err := output.RenderJSON(finalReport, true)
-				if err != nil {
-					return err
-				}
 				if out == "" || out == "-" {
+					content, err := output.RenderJSON(finalReport, true)
+					if err != nil {
+						return err
+					}
 					fmt.Print(content)
 					return nil
 				}
-				return os.WriteFile(out, []byte(content), 0o644)
+				return output.WriteJSONFile(out, finalReport, true)
 
 			default:
 				return fmt.Errorf("unsupported format: %s", format)

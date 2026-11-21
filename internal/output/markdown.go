@@ -1,6 +1,7 @@
 package output
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
@@ -11,6 +12,9 @@ import (
 // RenderMarkdown produces a comprehensive, hierarchical Markdown report.
 func RenderMarkdown(r report.CrawlReport, title string) (string, error) {
 	var b strings.Builder
+	if len(r.Pages) > 0 {
+		b.Grow(len(r.Pages) * 128)
+	}
 
 	if title == "" {
 		title = "Spiderly Crawl & Site Hierarchy Report"
@@ -152,11 +156,21 @@ func RenderMarkdown(r report.CrawlReport, title string) (string, error) {
 }
 
 func WriteMarkdownFile(path string, r report.CrawlReport, title string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	bw := bufio.NewWriterSize(f, 64*1024)
 	s, err := RenderMarkdown(r, title)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(s), 0o644)
+	if _, err := bw.WriteString(s); err != nil {
+		return err
+	}
+	return bw.Flush()
 }
 
 func escapeMarkdown(s string) string {

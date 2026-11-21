@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -262,18 +263,26 @@ Examples:
 
 			export := core.ToScrapedPageResults(processedPages)
 
-			data, err := json.MarshalIndent(export, "", "  ")
+			if outputPath == "" || outputPath == "-" {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(export)
+			}
+
+			f, err := os.Create(outputPath)
 			if err != nil {
+				return fmt.Errorf("failed to create output file: %w", err)
+			}
+			defer f.Close()
+
+			bw := bufio.NewWriterSize(f, 64*1024)
+			enc := json.NewEncoder(bw)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(export); err != nil {
 				return fmt.Errorf("failed to encode results: %w", err)
 			}
-
-			if outputPath == "" || outputPath == "-" {
-				_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
-				return err
-			}
-
-			if err := os.WriteFile(outputPath, data, 0o644); err != nil {
-				return fmt.Errorf("failed to write output file: %w", err)
+			if err := bw.Flush(); err != nil {
+				return fmt.Errorf("failed to flush output file: %w", err)
 			}
 
 			_, err = fmt.Fprintf(
