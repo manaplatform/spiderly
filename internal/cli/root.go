@@ -2,16 +2,21 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
+
+	"spiderly/internal/core"
+	"spiderly/internal/output"
+	"spiderly/internal/report"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	version = "dev"
+	version = "v0.0.1"
 	commit  = "none"
-	date    = "unknown"
+	date    = "2026.11.21"
 )
 
 func SetBuildInfo(v, c, d string) {
@@ -62,8 +67,27 @@ func buildVersionString() string {
 }
 
 func newRunCmd() *cobra.Command {
-	var format string
-	var output string
+	var (
+		format           string
+		outputFile       string
+		sitemapURL       string
+		maxPages         int
+		maxDepth         int
+		concurrency      int
+		delay            time.Duration
+		timeout          time.Duration
+		forceRecursive   bool
+		headless         bool
+		browserVisible   bool
+		browserTimeout   time.Duration
+		browserStrategy  string
+		clickCrawl       bool
+		clickFallback    bool
+		maxClicksPerPage int
+		verbose          bool
+		noColor          bool
+		proxyValues      []string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "run <url>",
@@ -72,28 +96,116 @@ func newRunCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targetURL := args[0]
+			resolvedProxies := resolveProxyList(proxyValues, os.Getenv("SPIDERLY_PROXY"))
+
+			if clickFallback {
+				clickCrawl = true
+				headless = true
+				browserStrategy = "fallback"
+			} else if clickCrawl && !headless {
+				headless = true
+			}
+
+			if browserTimeout <= 0 {
+				browserTimeout = timeout
+			}
+			if browserStrategy == "" {
+				browserStrategy = "always"
+			}
 
 			printRunHeader(targetURL)
 
 			step("Validating target", targetURL)
-			time.Sleep(200 * time.Millisecond)
+			cfg := core.CoreConfig{
+				TargetURL:        targetURL,
+				SitemapURL:       sitemapURL,
+				MaxPages:         maxPages,
+				MaxDepth:         maxDepth,
+				Concurrency:      concurrency,
+				Delay:            delay,
+				Timeout:          timeout,
+				ForceRecursive:   forceRecursive,
+				Headless:         headless,
+				BrowserVisible:   browserVisible,
+				BrowserTimeout:   browserTimeout,
+				BrowserStrategy:  browserStrategy,
+				ClickCrawl:       clickCrawl,
+				MaxClicksPerPage: maxClicksPerPage,
+				Verbose:          verbose,
+				NoColor:          noColor,
+				Proxies:          resolvedProxies,
+			}
 
-			step("Starting crawler", "collecting pages and assets")
-			time.Sleep(350 * time.Millisecond)
+			engine := core.NewCore(cfg)
 
-			step("Analyzing results", "building structured findings")
-			time.Sleep(350 * time.Millisecond)
+			step("Starting crawler", fmt.Sprintf("target=%s headless=%v", targetURL, headless))
+			results, err := engine.Run()
+			if err != nil {
+				return fmt.Errorf("crawl failed: %w", err)
+			}
 
-			step("Rendering report", fmt.Sprintf("format=%s output=%s", format, output))
-			time.Sleep(250 * time.Millisecond)
+			step("Analyzing results", fmt.Sprintf("processing %d crawled pages", len(results)))
+			crawlReport := report.CrawlReport{
+				Meta: report.Meta{
+					StartURL: targetURL,
+				},
+				Statistics: report.Statistics{
+					TotalPages: len(results),
+				},
+				Pages: make([]report.Page, len(results)),
+			}
+			for i, p := range results {
+				crawlReport.Pages[i] = report.Page{
+					URL:        p.URL,
+					Title:      p.Title,
+					StatusCode: p.StatusCode,
+				}
+			}
 
-			printRunSuccess(targetURL, format, output)
+			step("Rendering report", fmt.Sprintf("format=%s output=%s", format, outputFile))
+			var reportContent string
+			switch strings.ToLower(format) {
+			case "json":
+				reportContent, err = output.RenderJSON(crawlReport, true)
+			default:
+				reportContent, err = output.RenderMarkdown(crawlReport, fmt.Sprintf("Spiderly Crawl Report: %s", targetURL))
+			}
+			if err != nil {
+				return fmt.Errorf("render report: %w", err)
+			}
+
+			if outputFile == "" || outputFile == "-" {
+				fmt.Fprintln(cmd.OutOrStdout(), reportContent)
+			} else {
+				if err := os.WriteFile(outputFile, []byte(reportContent), 0o644); err != nil {
+					return fmt.Errorf("write report: %w", err)
+				}
+			}
+
+			printRunSuccess(targetURL, format, outputFile, len(results))
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVarP(&format, "format", "f", "markdown", "Report format")
-	cmd.Flags().StringVarP(&output, "output", "o", "report.md", "Output report file")
+	cmd.Flags().StringVarP(&format, "format", "f", "markdown", "Report format: markdown|json")
+	cmd.Flags().StringVarP(&outputFile, "output", "o", "report.md", "Output report file, use '-' for stdout")
+	cmd.Flags().StringVar(&sitemapURL, "sitemap-url", "", "direct sitemap URL to use instead of discovery")
+	cmd.Flags().IntVar(&maxPages, "max-pages", 100, "maximum number of pages to crawl")
+	cmd.Flags().IntVar(&maxDepth, "max-depth", 3, "maximum recursive crawl depth")
+	cmd.Flags().IntVar(&concurrency, "concurrency", 5, "number of concurrent requests")
+	cmd.Flags().DurationVar(&delay, "delay", 200*time.Millisecond, "delay between requests")
+	cmd.Flags().DurationVar(&timeout, "timeout", 30*time.Second, "request timeout")
+	cmd.Flags().BoolVar(&forceRecursive, "force-recursive", false, "force recursive crawling and skip sitemap discovery")
+	cmd.Flags().BoolVar(&headless, "headless", false, "enable headless browser rendering via ChromeDP")
+	cmd.Flags().BoolVar(&browserVisible, "browser-visible", false, "show browser window instead of headless (useful for debugging)")
+	cmd.Flags().DurationVar(&browserTimeout, "browser-timeout", 0, "browser rendering and navigation timeout (defaults to --timeout)")
+	cmd.Flags().StringVar(&browserStrategy, "browser-strategy", "always", "browser rendering strategy: 'always' (render all pages in ChromeDP) or 'fallback' (Colly fast path, ChromeDP when JS is required)")
+	cmd.Flags().BoolVar(&clickCrawl, "click-crawl", false, "enable click-based link discovery for interactive elements (buttons, SPA nav, load more)")
+	cmd.Flags().BoolVar(&clickFallback, "click-fallback", false, "convenience shortcut: enables headless + click-crawl with fallback strategy")
+	cmd.Flags().IntVar(&maxClicksPerPage, "max-clicks-per-page", 10, "maximum interactive elements to click per page")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose logging")
+	cmd.Flags().BoolVar(&noColor, "no-color", false, "disable colored console output")
+	cmd.Flags().StringSliceVar(&proxyValues, "proxy", nil, "proxy URL(s), supports repeated/comma-separated values")
 
 	return cmd
 }
@@ -124,9 +236,9 @@ func step(title, detail string) {
 	fmt.Printf("  [*] %-20s %s\n", title, detail)
 }
 
-func printRunSuccess(target, format, output string) {
+func printRunSuccess(target, format, output string, pageCount int) {
 	fmt.Println()
-	fmt.Println("  [✓] Crawl completed successfully")
+	fmt.Printf("  [✓] Crawl completed successfully (%d pages)\n", pageCount)
 	fmt.Printf("  [✓] Target : %s\n", target)
 	fmt.Printf("  [✓] Format : %s\n", format)
 	fmt.Printf("  [✓] Output : %s\n", output)
@@ -137,17 +249,16 @@ func printRunSuccess(target, format, output string) {
 
 func spiderBanner() string {
 	return `
-                    \              /
-                     \    .--.    /
-                 \    \  /    \  /    /
-                  \    \/  ()  \/    /
-                   '--./ \  / \ \,--'
-                  ---'    '(  )'    '---
-                   .--.\ / '  ' \ /.--. 
-                  /    \/   /\   \/    \
-                 /     /   /  \   \     \
-                       /  /    \  \
-                      /__/      \__\
+                          .     .
+                         / \   / \
+                        /   \ /   \
+                       /  .--.--.  \
+                      /  /  ()  \  \
+                     /  /   ||   \  \
+                    /__/    ||    \__\
+                   '---.   /  \   .---'
+                        \ /    \ /
+                         '      '
 
      ███████╗██████╗ ██╗██████╗ ███████╗██████╗ ██╗  ██╗   ██╗
      ██╔════╝██╔══██╗██║██╔══██╗██╔════╝██╔══██╗██║  ╚██╗ ██╔╝
@@ -157,4 +268,3 @@ func spiderBanner() string {
      ╚══════╝╚═╝     ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝ ╚═╝
 `
 }
-

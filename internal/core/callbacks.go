@@ -23,9 +23,8 @@ func classifyError(err error) ErrorCategory {
 
 	msg := err.Error()
 
-	if _, ok := err.(net.Error); ok {
-		var netErr net.Error
-		if ok && netErr.Timeout() {
+	if netErr, ok := err.(net.Error); ok {
+		if netErr.Timeout() {
 			return ErrorCategoryTimeout
 		}
 		return ErrorCategoryNetwork
